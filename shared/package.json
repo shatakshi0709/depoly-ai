@@ -1,0 +1,20 @@
+{
+  "name": "@deplo/shared",
+  "version": "1.0.0",
+  "description": "Shared constants, schemas, and contracts for deplo.ai",
+  "main": "src/index.js",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./constants": "./src/constants.js"
+  },
+  "scripts": {
+    "test": "echo \"No test specified\" && exit 0"
+  },
+  "keywords": [
+    "deplo-ai",
+    "shared"
+  ],
+  "author": "deplo.ai team",
+  "license": "ISC"
+}

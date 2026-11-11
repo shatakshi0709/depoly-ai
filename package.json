@@ -1,0 +1,32 @@
+{
+  "name": "deplo-ai",
+  "version": "1.0.0",
+  "description": "AI-Assisted Deployment & Cloud Orchestration Platform",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "server",
+    "shared"
+  ],
+  "scripts": {
+    "dev:server": "npm --workspace=server run dev",
+    "dev:web": "npm --workspace=apps/web run dev",
+    "dev:desktop": "npm --workspace=apps/desktop run dev",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "keywords": [
+    "deployment",
+    "orchestration",
+    "render",
+    "vercel",
+    "electron",
+    "react",
+    "express"
+  ],
+  "author": "deplo.ai team",
+  "license": "ISC",
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
