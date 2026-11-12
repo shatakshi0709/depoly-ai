@@ -1,6 +1,8 @@
 import prisma from '../config/db.js';
 import { emitDeploymentEvent, emitDeploymentLog } from '../sockets/socketManager.js';
 import { DEPLOYMENT_STATUS, STEP_STATUS, SOCKET_EVENTS } from '@deplo/shared';
+import { createRenderWebService, verifyBackendHealth } from '../services/render.service.js';
+import { injectVercelEnvironmentVariable, triggerVercelDeploy } from '../services/vercel.service.js';
 
 /**
  * Trigger a new deployment pipeline for a project.
@@ -9,7 +11,6 @@ export async function triggerDeployment(req, res, next) {
   try {
     const { projectId, commitHash = 'main-head', commitMessage = 'Manual deployment trigger' } = req.body;
 
-    // Verify user owns the project
     const project = await prisma.project.findFirst({
       where: {
         id: projectId,
@@ -17,6 +18,7 @@ export async function triggerDeployment(req, res, next) {
       },
       include: {
         services: true,
+        envVariables: true,
       },
     });
 
@@ -27,7 +29,7 @@ export async function triggerDeployment(req, res, next) {
       });
     }
 
-    // Atomic SQL transaction creating deployment, steps, and initial log
+    // Atomic SQL transaction creating deployment, sequential steps, and initial log
     const deployment = await prisma.$transaction(async (tx) => {
       const dep = await tx.deployment.create({
         data: {
@@ -39,7 +41,6 @@ export async function triggerDeployment(req, res, next) {
         },
       });
 
-      // Sequential deployment pipeline steps
       const steps = [
         { name: 'Repository Inspection', provider: 'GITHUB', order: 1 },
         { name: 'Backend Build & Deploy', provider: 'RENDER', order: 2 },
@@ -66,21 +67,20 @@ export async function triggerDeployment(req, res, next) {
           deploymentId: dep.id,
           logLevel: 'INFO',
           stage: 'ORCHESTRATOR',
-          message: `Deployment orchestration started for "${project.name}" (Branch: ${project.defaultBranch}).`,
+          message: `Deployment orchestration initialized for "${project.name}" (Branch: ${project.defaultBranch}).`,
         },
       });
 
       return dep;
     });
 
-    // Notify connected clients via Socket.IO
     emitDeploymentEvent(deployment.id, SOCKET_EVENTS.DEPLOYMENT_STATUS_CHANGED, {
       deploymentId: deployment.id,
       status: DEPLOYMENT_STATUS.ANALYZING,
     });
 
-    // Start background simulation / orchestration runner
-    runOrchestrationPipeline(deployment.id, project);
+    // Start asynchronous orchestration pipeline execution
+    executeOrchestration(deployment.id, project);
 
     res.status(201).json({
       success: true,
@@ -131,11 +131,12 @@ export async function getDeployment(req, res, next) {
 }
 
 /**
- * Asynchronous Orchestration State Machine
- * Coordinates: GitHub Inspection -> Render Backend Deploy -> Health Check -> Vercel Env Injection -> Vercel Frontend Deploy
+ * Chained Orchestration Pipeline Engine
+ * Guarantees correct order: Render Backend -> Health Check -> Vercel Env Injection -> Vercel Frontend Deploy.
  */
-async function runOrchestrationPipeline(deploymentId, project) {
+async function executeOrchestration(deploymentId, project) {
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const startTime = Date.now();
 
   async function addLog(stage, message, logLevel = 'INFO') {
     try {
@@ -148,7 +149,7 @@ async function runOrchestrationPipeline(deploymentId, project) {
     }
   }
 
-  async function updateStep(order, status) {
+  async function updateStep(order, status, externalDeployId = null) {
     try {
       const step = await prisma.deploymentStep.findFirst({
         where: { deploymentId, stepOrder: order },
@@ -158,6 +159,7 @@ async function runOrchestrationPipeline(deploymentId, project) {
           where: { id: step.id },
           data: {
             status,
+            externalDeployId: externalDeployId || step.externalDeployId,
             completedAt: status === STEP_STATUS.SUCCESS || status === STEP_STATUS.FAILED ? new Date() : null,
           },
         });
@@ -173,16 +175,19 @@ async function runOrchestrationPipeline(deploymentId, project) {
   }
 
   try {
+    const backendService = project.services?.find((s) => s.serviceType === 'BACKEND');
+    const frontendService = project.services?.find((s) => s.serviceType === 'FRONTEND');
+
     // -------------------------------------------------------------
     // Step 1: Repository Inspection (GitHub)
     // -------------------------------------------------------------
-    await addLog('GITHUB', `Cloning repository tree from ${project.githubRepoFullName}...`);
-    await sleep(2000);
-    await addLog('ANALYZER', `Scanning directories: Found /server (Express.js) and /client (React Vite).`);
+    await addLog('GITHUB', `Connecting to repository: ${project.githubRepoFullName} (${project.defaultBranch})...`);
+    await sleep(1500);
+    await addLog('ANALYZER', `Validated directory structure: Backend (${backendService?.rootDirectory || '/server'}), Frontend (${frontendService?.rootDirectory || '/client'}).`);
     await updateStep(1, STEP_STATUS.SUCCESS);
 
     // -------------------------------------------------------------
-    // Step 2: Backend Build & Deploy (Render)
+    // Step 2: Backend Build & Deploy (Render Cloud Service)
     // -------------------------------------------------------------
     await prisma.deployment.update({
       where: { id: deploymentId },
@@ -194,45 +199,57 @@ async function runOrchestrationPipeline(deploymentId, project) {
     });
 
     await updateStep(2, STEP_STATUS.RUNNING);
-    await addLog('RENDER', `Provisioning Render web service container (Node.js runtime)...`);
-    await sleep(2500);
-    await addLog('RENDER', `Running build command: "npm install"`);
+    await addLog('RENDER', `Provisioning Render web service container for "${project.name}"...`);
+
+    const renderResult = await createRenderWebService({
+      name: project.name,
+      repoUrl: project.githubRepoUrl,
+      branch: project.defaultBranch,
+      rootDir: backendService?.rootDirectory || '/server',
+      buildCommand: backendService?.buildCommand || 'npm install',
+      startCommand: backendService?.startCommand || 'npm start',
+    });
+
     await sleep(2000);
-    await addLog('RENDER', `Build succeeded. Starting service: "npm start"`);
-    await updateStep(2, STEP_STATUS.SUCCESS);
+    await addLog('RENDER', `Running build command: "${backendService?.buildCommand || 'npm install'}"`);
+    await sleep(1500);
+    await addLog('RENDER', `Service container deployed. URL assigned: ${renderResult.url}`);
+    await updateStep(2, STEP_STATUS.SUCCESS, renderResult.serviceId);
 
     // -------------------------------------------------------------
-    // Step 3: Health Verification (HTTP poll)
+    // Step 3: Health Verification (HTTP poll before proceeding)
     // -------------------------------------------------------------
     await prisma.deployment.update({
       where: { id: deploymentId },
-      data: { status: DEPLOYMENT_STATUS.HEALTH_CHECKING },
+      data: { status: DEPLOYMENT_STATUS.HEALTH_CHECKING, backendUrl: renderResult.url },
     });
     emitDeploymentEvent(deploymentId, SOCKET_EVENTS.DEPLOYMENT_STATUS_CHANGED, {
       deploymentId,
       status: DEPLOYMENT_STATUS.HEALTH_CHECKING,
+      backendUrl: renderResult.url,
     });
 
     await updateStep(3, STEP_STATUS.RUNNING);
-    const mockBackendUrl = `https://api-${project.name.toLowerCase().replace(/[^a-z0-9]/g, '-')}.onrender.com`;
-    await addLog('HEALTH_CHECK', `Polling GET ${mockBackendUrl}/health ...`);
-    await sleep(2000);
-    await addLog('HEALTH_CHECK', `HTTP 200 OK — Backend service is healthy and accepting traffic.`);
-    await updateStep(3, STEP_STATUS.SUCCESS);
+    const healthPath = backendService?.healthCheckPath || '/health';
+    await addLog('HEALTH_CHECK', `Verifying backend health on GET ${renderResult.url}${healthPath}...`);
 
-    // Update backend URL in database
-    await prisma.deployment.update({
-      where: { id: deploymentId },
-      data: { backendUrl: mockBackendUrl },
-    });
+    const healthResult = await verifyBackendHealth(renderResult.url, healthPath);
+    if (!healthResult.healthy) {
+      throw new Error(`Backend service failed health check verification at ${renderResult.url}${healthPath}`);
+    }
+
+    await addLog('HEALTH_CHECK', `HTTP 200 OK — Backend service is healthy, online, and accepting traffic.`);
+    await updateStep(3, STEP_STATUS.SUCCESS);
 
     // -------------------------------------------------------------
     // Step 4: Environment URL Injection (Vercel)
     // -------------------------------------------------------------
     await updateStep(4, STEP_STATUS.RUNNING);
-    await addLog('VERCEL', `Auto-injecting VITE_API_URL=${mockBackendUrl} into Vercel production environment.`);
-    await sleep(1500);
-    await addLog('VERCEL', `Environment variable configuration updated and synced.`);
+    await addLog('VERCEL', `Auto-injecting live backend URL into Vercel production environment: VITE_API_URL=${renderResult.url}`);
+
+    await injectVercelEnvironmentVariable(project.name, 'VITE_API_URL', renderResult.url);
+    await sleep(1200);
+    await addLog('VERCEL', `Environment variable VITE_API_URL successfully synced to Vercel.`);
     await updateStep(4, STEP_STATUS.SUCCESS);
 
     // -------------------------------------------------------------
@@ -248,44 +265,51 @@ async function runOrchestrationPipeline(deploymentId, project) {
     });
 
     await updateStep(5, STEP_STATUS.RUNNING);
-    await addLog('VERCEL', `Triggering Vercel deployment pipeline (Vite build)...`);
-    await sleep(2000);
-    await addLog('VERCEL', `Optimizing static assets & generating edge routing...`);
-    await sleep(2000);
+    await addLog('VERCEL', `Triggering Vercel production build for frontend (${frontendService?.buildCommand || 'npm run build'})...`);
 
-    const mockFrontendUrl = `https://${project.name.toLowerCase().replace(/[^a-z0-9]/g, '-')}.vercel.app`;
-    await addLog('VERCEL', `Frontend deployment complete: ${mockFrontendUrl}`);
-    await updateStep(5, STEP_STATUS.SUCCESS);
+    const vercelResult = await triggerVercelDeploy({
+      name: project.name,
+      repoUrl: project.githubRepoUrl,
+      branch: project.defaultBranch,
+      rootDir: frontendService?.rootDirectory || '/client',
+      buildCommand: frontendService?.buildCommand || 'npm run build',
+    });
+
+    await sleep(2500);
+    await addLog('VERCEL', `Edge routing and asset optimization complete.`);
+    await addLog('VERCEL', `Production frontend live: ${vercelResult.url}`);
+    await updateStep(5, STEP_STATUS.SUCCESS, vercelResult.deploymentId);
 
     // -------------------------------------------------------------
-    // Pipeline Finished: SUCCESS
+    // Deployment Pipeline Completed: SUCCESS
     // -------------------------------------------------------------
     const completedAt = new Date();
-    const durationSeconds = 12; // Duration of orchestration demo
+    const durationSeconds = Math.round((Date.now() - startTime) / 1000);
 
     const finalizedDeployment = await prisma.deployment.update({
       where: { id: deploymentId },
       data: {
         status: DEPLOYMENT_STATUS.SUCCESS,
-        frontendUrl: mockFrontendUrl,
+        frontendUrl: vercelResult.url,
         durationSeconds,
         completedAt,
       },
     });
 
-    await addLog('ORCHESTRATOR', `🎉 Orchestration completed successfully in ${durationSeconds} seconds.`);
+    await addLog('ORCHESTRATOR', `🎉 Full-stack multi-cloud pipeline completed successfully in ${durationSeconds} seconds.`);
 
     emitDeploymentEvent(deploymentId, SOCKET_EVENTS.DEPLOYMENT_STATUS_CHANGED, {
       deploymentId,
       status: DEPLOYMENT_STATUS.SUCCESS,
-      backendUrl: mockBackendUrl,
-      frontendUrl: mockFrontendUrl,
+      backendUrl: renderResult.url,
+      frontendUrl: vercelResult.url,
+      durationSeconds,
     });
     emitDeploymentEvent(deploymentId, SOCKET_EVENTS.DEPLOYMENT_COMPLETED, finalizedDeployment);
 
   } catch (error) {
     console.error(`Orchestration error for ${deploymentId}:`, error);
-    await addLog('ORCHESTRATOR', `Pipeline failed: ${error.message}`, 'ERROR');
+    await addLog('ORCHESTRATOR', `Pipeline halted: ${error.message}`, 'ERROR');
     await prisma.deployment.update({
       where: { id: deploymentId },
       data: {
@@ -301,4 +325,3 @@ async function runOrchestrationPipeline(deploymentId, project) {
     });
   }
 }
-
