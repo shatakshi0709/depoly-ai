@@ -63,3 +63,4 @@ export const FRAMEWORK_PRESETS = {
   DJANGO: 'DJANGO',
   STATIC_HTML: 'STATIC_HTML',
 };
+

@@ -61,3 +61,4 @@ Update `DATABASE_URL`, `JWT_SECRET`, and API keys as required.
 - Run Express Server: `npm run dev:server`
 - Run Web Application: `npm run dev:web`
 - Run Desktop Application: `npm run dev:desktop`
+

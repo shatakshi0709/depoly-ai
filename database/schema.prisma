@@ -1,0 +1,187 @@
+// ==============================================================================
+// deplo.ai — Prisma Schema Specification
+// ==============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ServiceType {
+  BACKEND
+  FRONTEND
+  DATABASE
+}
+
+enum ProviderType {
+  RENDER
+  VERCEL
+  GITHUB
+}
+
+enum DeploymentStatus {
+  QUEUED
+  ANALYZING
+  DEPLOYING_BACKEND
+  HEALTH_CHECKING
+  DEPLOYING_FRONTEND
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+enum StepStatus {
+  PENDING
+  RUNNING
+  SUCCESS
+  FAILED
+  SKIPPED
+}
+
+enum LogLevel {
+  DEBUG
+  INFO
+  WARN
+  ERROR
+}
+
+model User {
+  id            String         @id @default(uuid()) @db.Uuid
+  email         String         @unique @db.VarChar(255)
+  passwordHash  String?        @map("password_hash") @db.VarChar(255)
+  fullName      String         @map("full_name") @db.VarChar(100)
+  avatarUrl     String?        @map("avatar_url") @db.Text
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  oauthAccounts OAuthAccount[]
+  projects      Project[]
+
+  @@map("users")
+}
+
+model OAuthAccount {
+  id             String    @id @default(uuid()) @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  provider       String    @db.VarChar(50)
+  providerUserId String    @map("provider_user_id") @db.VarChar(100)
+  accessTokenEnc String    @map("access_token_enc") @db.Text
+  refreshTokenEnc String?  @map("refresh_token_enc") @db.Text
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerUserId])
+  @@map("oauth_accounts")
+}
+
+model Project {
+  id                 String                @id @default(uuid()) @db.Uuid
+  userId             String                @map("user_id") @db.Uuid
+  name               String                @db.VarChar(100)
+  githubRepoFullName String                @map("github_repo_full_name") @db.VarChar(255)
+  githubRepoUrl      String                @map("github_repo_url") @db.Text
+  defaultBranch      String                @default("main") @map("default_branch") @db.VarChar(50)
+  detectedPreset     String?               @map("detected_preset") @db.VarChar(50)
+  createdAt          DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime              @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user               User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  services           ProjectService[]
+  envVariables       EnvironmentVariable[]
+  deployments        Deployment[]
+
+  @@index([userId], map: "idx_projects_user_id")
+  @@map("projects")
+}
+
+model ProjectService {
+  id              String       @id @default(uuid()) @db.Uuid
+  projectId       String       @map("project_id") @db.Uuid
+  serviceType     ServiceType  @map("service_type")
+  provider        ProviderType @map("provider")
+  rootDirectory   String       @default("/") @map("root_directory") @db.VarChar(255)
+  buildCommand    String?      @map("build_command") @db.VarChar(255)
+  startCommand    String?      @map("start_command") @db.VarChar(255)
+  healthCheckPath String       @default("/health") @map("health_check_path") @db.VarChar(255)
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  project         Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, serviceType])
+  @@map("project_services")
+}
+
+model EnvironmentVariable {
+  id            String   @id @default(uuid()) @db.Uuid
+  projectId     String   @map("project_id") @db.Uuid
+  serviceTarget String   @default("SHARED") @map("service_target") @db.VarChar(20)
+  key           String   @db.VarChar(100)
+  valueEnc      String   @map("value_enc") @db.Text
+  isSecret      Boolean  @default(true) @map("is_secret")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, serviceTarget, key])
+  @@map("environment_variables")
+}
+
+model Deployment {
+  id              String           @id @default(uuid()) @db.Uuid
+  projectId       String           @map("project_id") @db.Uuid
+  status          DeploymentStatus @default(QUEUED)
+  commitHash      String?          @map("commit_hash") @db.VarChar(40)
+  commitMessage   String?          @map("commit_message") @db.Text
+  triggeredBy     String           @default("MANUAL") @map("triggered_by") @db.VarChar(50)
+  backendUrl      String?          @map("backend_url") @db.Text
+  frontendUrl     String?          @map("frontend_url") @db.Text
+  durationSeconds Int?             @map("duration_seconds")
+  errorMessage    String?          @map("error_message") @db.Text
+  startedAt       DateTime         @default(now()) @map("started_at") @db.Timestamptz(6)
+  completedAt     DateTime?        @map("completed_at") @db.Timestamptz(6)
+
+  project         Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  steps           DeploymentStep[]
+  logs            DeploymentLog[]
+
+  @@index([projectId], map: "idx_deployments_project_id")
+  @@index([status], map: "idx_deployments_status")
+  @@map("deployments")
+}
+
+model DeploymentStep {
+  id               String      @id @default(uuid()) @db.Uuid
+  deploymentId     String      @map("deployment_id") @db.Uuid
+  stepName         String      @map("step_name") @db.VarChar(100)
+  provider         String?     @db.VarChar(30)
+  externalDeployId String?     @map("external_deploy_id") @db.VarChar(255)
+  status           StepStatus  @default(PENDING)
+  stepOrder        Int         @map("step_order")
+  startedAt        DateTime?   @map("started_at") @db.Timestamptz(6)
+  completedAt      DateTime?   @map("completed_at") @db.Timestamptz(6)
+
+  deployment       Deployment  @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  @@index([deploymentId], map: "idx_deployment_steps_dep_id")
+  @@map("deployment_steps")
+}
+
+model DeploymentLog {
+  id           BigInt      @id @default(autoincrement())
+  deploymentId String      @map("deployment_id") @db.Uuid
+  logLevel     LogLevel    @default(INFO) @map("log_level")
+  stage        String      @db.VarChar(50)
+  message      String      @db.Text
+  createdAt    DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  deployment   Deployment  @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  @@index([deploymentId], map: "idx_deployment_logs_dep_id")
+  @@map("deployment_logs")
+}
+
