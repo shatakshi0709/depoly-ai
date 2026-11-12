@@ -4,9 +4,9 @@
   "description": "Native Electron Desktop Dashboard for deplo.ai",
   "main": "electron/main.js",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "start": "electron ."
+    "dev": "electron .",
+    "start": "electron .",
+    "build": "echo 'Desktop uses shared web build' && exit 0"
   },
   "dependencies": {
     "@deplo/shared": "*",
