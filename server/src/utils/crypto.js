@@ -51,3 +51,4 @@ export function decrypt(encryptedText) {
 
   return decrypted;
 }
+

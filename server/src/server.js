@@ -8,9 +8,15 @@ import { testDbConnection } from './config/db.js';
 import { initSocketIO } from './sockets/socketManager.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 
+// Polyfill BigInt JSON serialization for PostgreSQL counts and aggregates
+BigInt.prototype.toJSON = function () {
+  return Number(this);
+};
+
 // Route imports
 import healthRoutes from './routes/health.routes.js';
 import authRoutes from './routes/auth.routes.js';
+import projectRoutes from './routes/project.routes.js';
 
 const app = express();
 const server = http.createServer(app);
@@ -40,6 +46,7 @@ app.get('/', (req, res) => {
 // API Routes
 app.use('/api/v1', healthRoutes);
 app.use('/api/v1/auth', authRoutes);
+app.use('/api/v1/projects', projectRoutes);
 
 // Error Handling
 app.use(notFoundHandler);
