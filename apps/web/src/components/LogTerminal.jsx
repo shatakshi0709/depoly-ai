@@ -102,3 +102,4 @@ export function LogTerminal({ logs = [], isLive = false }) {
     </div>
   );
 }
+

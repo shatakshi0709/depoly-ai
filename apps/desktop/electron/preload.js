@@ -25,3 +25,4 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Environment identifier
   isElectron: true,
 });
+

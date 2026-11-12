@@ -17,6 +17,7 @@ BigInt.prototype.toJSON = function () {
 import healthRoutes from './routes/health.routes.js';
 import authRoutes from './routes/auth.routes.js';
 import projectRoutes from './routes/project.routes.js';
+import githubRoutes from './routes/github.routes.js';
 
 const app = express();
 const server = http.createServer(app);
@@ -47,6 +48,7 @@ app.get('/', (req, res) => {
 app.use('/api/v1', healthRoutes);
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/projects', projectRoutes);
+app.use('/api/v1/github', githubRoutes);
 
 // Error Handling
 app.use(notFoundHandler);

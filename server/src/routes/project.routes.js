@@ -19,3 +19,4 @@ router.post('/deployments/trigger', triggerDeployment);
 router.get('/deployments/:id', getDeployment);
 
 export default router;
+

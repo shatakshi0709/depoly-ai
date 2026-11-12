@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { 
@@ -7,44 +7,31 @@ import {
   Globe, 
   CheckCircle2, 
   Sparkles, 
-  ArrowRight, 
   AlertCircle,
-  HelpCircle
+  HelpCircle,
+  Layers,
+  ArrowRight,
+  RefreshCw
 } from 'lucide-react';
 import { GithubIcon } from '../components/GithubIcon';
 
-const PRESET_TEMPLATES = [
-  {
-    name: 'ecommerce-fullstack-starter',
-    repo: 'demo-org/ecommerce-fullstack-starter',
-    url: 'https://github.com/demo-org/ecommerce-fullstack-starter',
-    branch: 'main',
-    preset: 'REACT_VITE',
-    backend: { dir: '/server', build: 'npm install', start: 'npm start', health: '/api/health' },
-    frontend: { dir: '/client', build: 'npm run build', start: 'npm run preview' },
-  },
-  {
-    name: 'saas-analytics-app',
-    repo: 'demo-org/saas-analytics-app',
-    url: 'https://github.com/demo-org/saas-analytics-app',
-    branch: 'main',
-    preset: 'REACT_VITE',
-    backend: { dir: '/backend', build: 'npm install', start: 'node index.js', health: '/health' },
-    frontend: { dir: '/frontend', build: 'npm run build', start: 'npm run preview' },
-  },
-];
-
 export function NewProject() {
-  const [name, setName] = useState('ecommerce-fullstack-starter');
-  const [repoFullName, setRepoFullName] = useState('demo-org/ecommerce-fullstack-starter');
-  const [repoUrl, setRepoUrl] = useState('https://github.com/demo-org/ecommerce-fullstack-starter');
+  const [repositories, setRepositories] = useState([]);
+  const [loadingRepos, setLoadingRepos] = useState(true);
+
+  // Form states
+  const [name, setName] = useState('');
+  const [repoFullName, setRepoFullName] = useState('');
+  const [repoUrl, setRepoUrl] = useState('');
   const [defaultBranch, setDefaultBranch] = useState('main');
+
+  // Analysis states
   const [analyzing, setAnalyzing] = useState(false);
-  const [analysisDone, setAnalysisDone] = useState(true);
+  const [analysisResult, setAnalysisResult] = useState(null);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  // Configuration settings (auto-detected)
+  // Editable configurations pre-filled by analysis
   const [backendConfig, setBackendConfig] = useState({
     rootDirectory: '/server',
     buildCommand: 'npm install',
@@ -60,30 +47,74 @@ export function NewProject() {
 
   const navigate = useNavigate();
 
-  const handleSelectTemplate = (tpl) => {
-    setName(tpl.name);
-    setRepoFullName(tpl.repo);
-    setRepoUrl(tpl.url);
-    setDefaultBranch(tpl.branch);
-    setBackendConfig({
-      rootDirectory: tpl.backend.dir,
-      buildCommand: tpl.backend.build,
-      startCommand: tpl.backend.start,
-      healthCheckPath: tpl.backend.health,
-    });
-    setFrontendConfig({
-      rootDirectory: tpl.frontend.dir,
-      buildCommand: tpl.frontend.build,
-      startCommand: tpl.frontend.start,
-    });
+  // 1. Fetch available repositories on load
+  useEffect(() => {
+    async function loadRepos() {
+      try {
+        const res = await api.get('/github/repos');
+        const list = res.data.data || [];
+        setRepositories(list);
+
+        // Pre-select the first repo
+        if (list.length > 0) {
+          selectRepo(list[0]);
+        }
+      } catch (err) {
+        console.error('Failed to load repositories:', err);
+      } finally {
+        setLoadingRepos(false);
+      }
+    }
+    loadRepos();
+  }, []);
+
+  const selectRepo = (repo) => {
+    setName(repo.name);
+    setRepoFullName(repo.fullName);
+    setRepoUrl(repo.url);
+    setDefaultBranch(repo.defaultBranch || 'main');
+    // Trigger automated analysis for the selected repo
+    triggerAnalysis(repo.url, repo.defaultBranch || 'main');
   };
 
-  const handleAnalyze = () => {
+  const triggerAnalysis = async (urlToAnalyze, branchToAnalyze) => {
+    const targetUrl = urlToAnalyze || repoUrl;
+    if (!targetUrl) return;
+
     setAnalyzing(true);
-    setTimeout(() => {
+    setError('');
+
+    try {
+      const res = await api.post('/github/analyze', {
+        repoUrl: targetUrl,
+        branch: branchToAnalyze || defaultBranch,
+      });
+
+      const report = res.data.data;
+      setAnalysisResult(report);
+
+      // Pre-fill backend and frontend configuration fields
+      if (report.backend) {
+        setBackendConfig({
+          rootDirectory: report.backend.rootDirectory || '/server',
+          buildCommand: report.backend.buildCommand || 'npm install',
+          startCommand: report.backend.startCommand || 'npm start',
+          healthCheckPath: report.backend.healthCheckPath || '/health',
+        });
+      }
+
+      if (report.frontend) {
+        setFrontendConfig({
+          rootDirectory: report.frontend.rootDirectory || '/client',
+          buildCommand: report.frontend.buildCommand || 'npm run build',
+          startCommand: report.frontend.startCommand || 'npm run preview',
+        });
+      }
+    } catch (err) {
+      setError(err.response?.data?.message || 'Repository analysis failed.');
+    } finally {
       setAnalyzing(false);
-      setAnalysisDone(true);
-    }, 1200);
+    }
   };
 
   const handleSubmit = async (e) => {
@@ -98,7 +129,7 @@ export function NewProject() {
         githubRepoFullName: repoFullName,
         githubRepoUrl: repoUrl,
         defaultBranch,
-        detectedPreset: 'REACT_VITE',
+        detectedPreset: analysisResult?.detectedPreset || 'REACT_VITE',
         backendService: backendConfig,
         frontendService: frontendConfig,
       });
@@ -108,7 +139,7 @@ export function NewProject() {
       // 2. Trigger initial deployment
       const deployRes = await api.post('/projects/deployments/trigger', {
         projectId,
-        commitMessage: 'Initial full-stack automated deployment',
+        commitMessage: 'Initial automated multi-cloud deployment',
       });
 
       const deploymentId = deployRes.data.data.id;
@@ -130,7 +161,7 @@ export function NewProject() {
           <span>New Multi-Cloud Deployment</span>
         </h1>
         <p className="text-sm text-slate-400 mt-1">
-          Connect your GitHub repository. deplo.ai analyzes the codebase, configures Render for your backend, Vercel for your frontend, and automates URL injection.
+          Select or paste a repository. deplo.ai analyzes the codebase, configures Render for your backend, Vercel for your frontend, and automates URL injection.
         </p>
       </div>
 
@@ -141,28 +172,30 @@ export function NewProject() {
         </div>
       )}
 
-      {/* Preset Starter Repositories */}
+      {/* Repository Selection */}
       <div className="space-y-3">
-        <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-          Quick Start with Demo Repositories
+        <label className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center justify-between">
+          <span>Choose a Repository to Deploy</span>
+          {loadingRepos && <span className="text-[11px] text-slate-500">Loading repositories...</span>}
         </label>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          {PRESET_TEMPLATES.map((tpl) => (
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {repositories.map((repo) => (
             <button
-              key={tpl.name}
+              key={repo.id}
               type="button"
-              onClick={() => handleSelectTemplate(tpl)}
-              className={`p-4 rounded-xl border text-left transition flex items-start gap-3 ${
-                name === tpl.name
-                  ? 'border-emerald-500 bg-emerald-500/5'
+              onClick={() => selectRepo(repo)}
+              className={`p-3.5 rounded-xl border text-left transition flex items-start gap-2.5 ${
+                repoFullName === repo.fullName
+                  ? 'border-emerald-500 bg-emerald-500/5 ring-1 ring-emerald-500/20'
                   : 'border-slate-800 bg-slate-900/40 hover:border-slate-700'
               }`}
             >
-              <GithubIcon className="w-5 h-5 text-slate-400 shrink-0 mt-0.5" />
-              <div>
-                <div className="text-sm font-semibold text-slate-200">{tpl.name}</div>
-                <div className="text-xs text-slate-400 font-mono mt-0.5">{tpl.repo}</div>
-                <div className="text-[11px] text-emerald-400 mt-1">Render (Node) + Vercel (React)</div>
+              <GithubIcon className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+              <div className="truncate">
+                <div className="text-xs font-bold text-slate-200 truncate">{repo.name}</div>
+                <div className="text-[11px] text-slate-400 font-mono truncate">{repo.fullName}</div>
+                <div className="text-[10px] text-emerald-400 mt-1 font-semibold">{repo.language || 'Fullstack'}</div>
               </div>
             </button>
           ))}
@@ -170,7 +203,7 @@ export function NewProject() {
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-6">
-        {/* Repository Details Card */}
+        {/* Repository Coordinates */}
         <div className="p-6 rounded-2xl bg-slate-900/60 border border-slate-800 space-y-4">
           <h2 className="text-sm font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
             <GithubIcon className="w-4 h-4 text-slate-400" />
@@ -202,7 +235,7 @@ export function NewProject() {
                 value={defaultBranch}
                 onChange={(e) => setDefaultBranch(e.target.value)}
                 placeholder="main"
-                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 text-sm transition"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 text-sm transition font-mono"
               />
             </div>
           </div>
@@ -226,26 +259,35 @@ export function NewProject() {
               />
               <button
                 type="button"
-                onClick={handleAnalyze}
-                disabled={analyzing}
-                className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition flex items-center gap-1.5"
+                onClick={() => triggerAnalysis(repoUrl, defaultBranch)}
+                disabled={analyzing || !repoUrl}
+                className="px-4 py-2.5 rounded-xl bg-emerald-500/10 hover:bg-emerald-500 text-emerald-400 hover:text-slate-950 text-xs font-semibold transition flex items-center gap-1.5 border border-emerald-500/20 disabled:opacity-50"
               >
-                <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
-                {analyzing ? 'Inspecting...' : 'Analyze Tree'}
+                <Sparkles className="w-3.5 h-3.5" />
+                {analyzing ? 'Scanning...' : 'Analyze Architecture'}
               </button>
             </div>
           </div>
         </div>
 
         {/* AI Framework Analysis Results */}
-        {analysisDone && (
+        {analysisResult && (
           <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
-                <CheckCircle2 className="w-4 h-4" />
-                <span>Architecture Heuristic Analysis Complete</span>
-              </h2>
-              <span className="text-xs text-slate-400">Order: Backend $\rightarrow$ Frontend</span>
+            <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+                <div>
+                  <div className="text-xs font-bold text-emerald-300 uppercase tracking-wider">
+                    Architecture Detected: {analysisResult.detectedPreset}
+                  </div>
+                  <div className="text-xs text-slate-300 mt-0.5">
+                    {analysisResult.orchestrationPlan?.reasoning}
+                  </div>
+                </div>
+              </div>
+              <span className="text-[10px] px-2 py-0.5 rounded font-mono font-bold bg-slate-900 text-slate-300 border border-slate-700">
+                {analysisResult.repository?.isMonorepo ? 'Monorepo' : 'Standard'}
+              </span>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -254,7 +296,7 @@ export function NewProject() {
                 <div className="flex items-center justify-between pb-3 border-b border-slate-800">
                   <div className="flex items-center gap-2">
                     <Server className="w-4 h-4 text-emerald-400" />
-                    <span className="text-sm font-bold text-white">Backend Service</span>
+                    <span className="text-sm font-bold text-white">Backend Web Service</span>
                   </div>
                   <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/10 text-purple-400 border border-purple-500/20">
                     TARGET: RENDER
@@ -283,6 +325,16 @@ export function NewProject() {
                   </div>
 
                   <div>
+                    <label className="text-slate-400 block mb-1">Start Command</label>
+                    <input
+                      type="text"
+                      value={backendConfig.startCommand}
+                      onChange={(e) => setBackendConfig({ ...backendConfig, startCommand: e.target.value })}
+                      className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 font-mono text-slate-200 focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+
+                  <div>
                     <label className="text-slate-400 block mb-1">Health Check Path</label>
                     <input
                       type="text"
@@ -299,7 +351,7 @@ export function NewProject() {
                 <div className="flex items-center justify-between pb-3 border-b border-slate-800">
                   <div className="flex items-center gap-2">
                     <Globe className="w-4 h-4 text-sky-400" />
-                    <span className="text-sm font-bold text-white">Frontend Service</span>
+                    <span className="text-sm font-bold text-white">Frontend Web Service</span>
                   </div>
                   <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-500/10 text-sky-400 border border-sky-500/20">
                     TARGET: VERCEL
@@ -323,6 +375,16 @@ export function NewProject() {
                       type="text"
                       value={frontendConfig.buildCommand}
                       onChange={(e) => setFrontendConfig({ ...frontendConfig, buildCommand: e.target.value })}
+                      className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 font-mono text-slate-200 focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-slate-400 block mb-1">Preview Command</label>
+                    <input
+                      type="text"
+                      value={frontendConfig.startCommand}
+                      onChange={(e) => setFrontendConfig({ ...frontendConfig, startCommand: e.target.value })}
                       className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 font-mono text-slate-200 focus:outline-none focus:border-emerald-500"
                     />
                   </div>
@@ -352,10 +414,10 @@ export function NewProject() {
 
           <button
             type="submit"
-            disabled={submitting}
+            disabled={submitting || analyzing}
             className="px-6 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm transition shadow-lg shadow-emerald-500/20 flex items-center gap-2 disabled:opacity-50"
           >
-            {submitting ? 'Initializing Orchestrator...' : 'Confirm & Deploy Pipeline'}
+            {submitting ? 'Initializing Pipeline...' : 'Confirm & Deploy Pipeline'}
             <Rocket className="w-4 h-4" />
           </button>
         </div>

@@ -36,3 +36,4 @@ export function useDesktopNotifications(deployment, projectName) {
     }
   }, [deployment?.status, projectName]);
 }
+
