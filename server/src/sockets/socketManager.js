@@ -1,39 +1,86 @@
 import { Server } from 'socket.io';
+import jwt from 'jsonwebtoken';
 import { SOCKET_EVENTS } from '@deplo/shared';
+import { env } from '../config/env.js';
+import prisma from '../config/db.js';
 
 let ioInstance = null;
 
-export function initSocketIO(httpServer, corsOrigin) {
+function extractToken(socket) {
+  const authToken = socket.handshake?.auth?.token;
+  if (authToken) return authToken;
+  const header = socket.handshake?.headers?.authorization;
+  if (typeof header === 'string' && header.startsWith('Bearer ')) {
+    return header.slice(7);
+  }
+  return null;
+}
+
+export function initSocketIO(httpServer, corsOrigins = []) {
+  const allowedOrigins = Array.isArray(corsOrigins) ? corsOrigins : [corsOrigins].filter(Boolean);
+
   ioInstance = new Server(httpServer, {
     cors: {
-      origin: [corsOrigin, 'http://localhost:5173', 'http://localhost:3000'],
+      origin(origin, callback) {
+        if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+        return callback(new Error('Origin not allowed by Socket.IO CORS'));
+      },
       methods: ['GET', 'POST'],
       credentials: true,
     },
   });
 
-  ioInstance.on('connection', (socket) => {
-    console.log(`🔌 Client connected to Socket.IO: ${socket.id}`);
+  // Authenticate socket connections before allowing room joins.
+  ioInstance.use((socket, next) => {
+    try {
+      const token = extractToken(socket);
+      if (!token) {
+        return next(new Error('Unauthorized'));
+      }
+      const decoded = jwt.verify(token, env.JWT_SECRET);
+      socket.user = decoded; // { userId, email, ... }
+      return next();
+    } catch {
+      return next(new Error('Unauthorized'));
+    }
+  });
 
-    // Join room for a specific deployment to receive live logs
-    socket.on(SOCKET_EVENTS.JOIN_DEPLOYMENT, ({ deploymentId }) => {
-      if (deploymentId) {
+  ioInstance.on('connection', (socket) => {
+    // User-scoped room for notifications
+    if (socket.user?.userId) {
+      socket.join(`user:${socket.user.userId}`);
+    }
+
+    // Join room for a specific deployment to receive live logs (owner only).
+    socket.on(SOCKET_EVENTS.JOIN_DEPLOYMENT, async ({ deploymentId } = {}) => {
+      try {
+        if (!deploymentId || typeof deploymentId !== 'string') {
+          socket.emit('deployment_room_error', { message: 'Invalid deployment identifier.' });
+          return;
+        }
+
+        const deployment = await prisma.deployment.findUnique({
+          where: { id: deploymentId },
+          select: { id: true, project: { select: { userId: true } } },
+        });
+
+        if (!deployment || deployment.project.userId !== socket.user?.userId) {
+          socket.emit('deployment_room_error', { message: 'Access denied for this deployment.' });
+          return;
+        }
+
         socket.join(`deployment:${deploymentId}`);
-        console.log(`📡 Socket ${socket.id} joined room: deployment:${deploymentId}`);
         socket.emit('joined_room', { room: `deployment:${deploymentId}` });
+      } catch {
+        socket.emit('deployment_room_error', { message: 'Unable to join deployment room.' });
       }
     });
 
     // Leave deployment room
-    socket.on(SOCKET_EVENTS.LEAVE_DEPLOYMENT, ({ deploymentId }) => {
-      if (deploymentId) {
+    socket.on(SOCKET_EVENTS.LEAVE_DEPLOYMENT, ({ deploymentId } = {}) => {
+      if (deploymentId && typeof deploymentId === 'string') {
         socket.leave(`deployment:${deploymentId}`);
-        console.log(`👋 Socket ${socket.id} left room: deployment:${deploymentId}`);
       }
-    });
-
-    socket.on('disconnect', () => {
-      console.log(`🔌 Client disconnected from Socket.IO: ${socket.id}`);
     });
   });
 
@@ -44,26 +91,32 @@ export function initSocketIO(httpServer, corsOrigin) {
  * Broadcast an event to all clients watching a deployment.
  */
 export function emitDeploymentEvent(deploymentId, eventName, data) {
-  if (!ioInstance) {
-    console.warn('Socket.IO not initialized yet');
-    return;
-  }
+  if (!ioInstance) return;
   ioInstance.to(`deployment:${deploymentId}`).emit(eventName, data);
 }
 
 /**
  * Stream a log chunk in real time to subscribers.
  */
-export function emitDeploymentLog(deploymentId, { stage, message, logLevel = 'INFO' }) {
+export function emitDeploymentLog(deploymentId, { stage, message, logLevel = 'INFO', source = 'ORCHESTRATOR' }) {
   if (!ioInstance) return;
   const payload = {
     deploymentId,
     stage,
     message,
     logLevel,
+    source,
     timestamp: new Date().toISOString(),
   };
   ioInstance.to(`deployment:${deploymentId}`).emit(SOCKET_EVENTS.DEPLOYMENT_LOG, payload);
+}
+
+/**
+ * Emit a user-scoped notification event.
+ */
+export function emitUserNotification(userId, notification) {
+  if (!ioInstance || !userId) return;
+  ioInstance.to(`user:${userId}`).emit(SOCKET_EVENTS.NOTIFICATION_CREATED, notification);
 }
 
 export function getIO() {

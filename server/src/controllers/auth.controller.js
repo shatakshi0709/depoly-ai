@@ -4,6 +4,7 @@ import axios from 'axios';
 import prisma from '../config/db.js';
 import { env } from '../config/env.js';
 import { encrypt } from '../utils/crypto.js';
+import { isNonEmptyString, isValidEmail, normalizeEmail } from '../utils/validate.js';
 
 /**
  * Generate a signed JWT for an authenticated user.
@@ -21,24 +22,33 @@ function generateToken(user) {
  */
 export async function register(req, res, next) {
   try {
-    const { email, password, fullName } = req.body;
+    const { email, password, fullName } = req.body || {};
 
-    if (!email || !password || !fullName) {
+    if (!isValidEmail(email) || typeof password !== 'string' || !isNonEmptyString(fullName)) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide email, password, and full name.',
+        message: 'A valid email, password, and full name are required.',
       });
     }
 
-    if (password.length < 6) {
+    if (password.length < 8 || password.length > 128) {
       return res.status(400).json({
         success: false,
-        message: 'Password must be at least 6 characters long.',
+        message: 'Password must be between 8 and 128 characters.',
       });
     }
+
+    if (fullName.trim().length > 100) {
+      return res.status(400).json({
+        success: false,
+        message: 'Full name is too long.',
+      });
+    }
+
+    const normalizedEmail = normalizeEmail(email);
 
     const existingUser = await prisma.user.findUnique({
-      where: { email: email.toLowerCase() },
+      where: { email: normalizedEmail },
     });
 
     if (existingUser) {
@@ -53,9 +63,9 @@ export async function register(req, res, next) {
 
     const newUser = await prisma.user.create({
       data: {
-        email: email.toLowerCase(),
+        email: normalizedEmail,
         passwordHash,
-        fullName,
+        fullName: fullName.trim(),
       },
       select: {
         id: true,
@@ -86,17 +96,18 @@ export async function register(req, res, next) {
  */
 export async function login(req, res, next) {
   try {
-    const { email, password } = req.body;
+    const { email, password } = req.body || {};
 
-    if (!email || !password) {
+    if (!isValidEmail(email) || typeof password !== 'string' || password.length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'Email and password are required.',
+        message: 'A valid email and password are required.',
       });
     }
 
+    const normalizedEmail = normalizeEmail(email);
     const user = await prisma.user.findUnique({
-      where: { email: email.toLowerCase() },
+      where: { email: normalizedEmail },
       include: {
         oauthAccounts: {
           select: { provider: true, createdAt: true },
@@ -191,12 +202,19 @@ export async function getMe(req, res, next) {
  */
 export async function githubOAuthCallback(req, res, next) {
   try {
-    const { code } = req.body;
+    const { code } = req.body || {};
 
-    if (!code) {
+    if (!isNonEmptyString(code) || code.length > 256) {
       return res.status(400).json({
         success: false,
-        message: 'OAuth authorization code is required.',
+        message: 'A valid OAuth authorization code is required.',
+      });
+    }
+
+    if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) {
+      return res.status(503).json({
+        success: false,
+        message: 'GitHub OAuth is not configured on the server.',
       });
     }
 
@@ -206,19 +224,19 @@ export async function githubOAuthCallback(req, res, next) {
       {
         client_id: env.GITHUB_CLIENT_ID,
         client_secret: env.GITHUB_CLIENT_SECRET,
-        code,
+        code: String(code).trim(),
       },
       {
         headers: { Accept: 'application/json' },
       }
     );
 
-    const { access_token: githubAccessToken, error, error_description } = tokenResponse.data;
+    const { access_token: githubAccessToken, error } = tokenResponse.data || {};
 
     if (error || !githubAccessToken) {
       return res.status(400).json({
         success: false,
-        message: error_description || 'Failed to exchange GitHub authorization code.',
+        message: 'Failed to exchange GitHub authorization code.',
       });
     }
 

@@ -1,4 +1,16 @@
 import prisma from '../config/db.js';
+import { isUuid, isNonEmptyString } from '../utils/validate.js';
+
+function sanitizeServiceInput(input) {
+  if (!input || typeof input !== 'object') return null;
+  const pick = (v, max = 255) => (typeof v === 'string' ? v.trim().slice(0, max) : undefined);
+  return {
+    rootDirectory: pick(input.rootDirectory),
+    buildCommand: pick(input.buildCommand),
+    startCommand: pick(input.startCommand),
+    healthCheckPath: pick(input.healthCheckPath),
+  };
+}
 
 /**
  * List all projects owned by the authenticated user.
@@ -35,6 +47,9 @@ export async function getProjects(req, res, next) {
 export async function getProjectById(req, res, next) {
   try {
     const { id } = req.params;
+    if (!isUuid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid project identifier.' });
+    }
 
     const project = await prisma.project.findFirst({
       where: {
@@ -93,53 +108,62 @@ export async function createProject(req, res, next) {
       detectedPreset = 'REACT_VITE',
       backendService,
       frontendService,
-    } = req.body;
+    } = req.body || {};
 
-    if (!name || !githubRepoFullName || !githubRepoUrl) {
+    if (!isNonEmptyString(name) || !isNonEmptyString(githubRepoFullName) || !isNonEmptyString(githubRepoUrl)) {
       return res.status(400).json({
         success: false,
-        message: 'Project name, GitHub repository full name, and repository URL are required.',
+        message: 'Project name, repository name, and repository URL are required.',
       });
     }
+
+    if (name.trim().length > 100 || githubRepoFullName.trim().length > 255 || githubRepoUrl.trim().length > 500) {
+      return res.status(400).json({ success: false, message: 'Project fields exceed allowed length.' });
+    }
+
+    const safeBackend = sanitizeServiceInput(backendService);
+    const safeFrontend = sanitizeServiceInput(frontendService);
+    const safeBranch = (typeof defaultBranch === 'string' ? defaultBranch.trim() : 'main').slice(0, 50) || 'main';
+    const safePreset = (typeof detectedPreset === 'string' ? detectedPreset.trim() : 'REACT_VITE').slice(0, 50) || 'REACT_VITE';
 
     const project = await prisma.$transaction(async (tx) => {
       // 1. Create Project
       const newProj = await tx.project.create({
         data: {
           userId: req.user.userId,
-          name,
-          githubRepoFullName,
-          githubRepoUrl,
-          defaultBranch,
-          detectedPreset,
+          name: name.trim(),
+          githubRepoFullName: githubRepoFullName.trim(),
+          githubRepoUrl: githubRepoUrl.trim(),
+          defaultBranch: safeBranch,
+          detectedPreset: safePreset,
         },
       });
 
       // 2. Create Backend Service (Render)
-      if (backendService) {
+      if (safeBackend) {
         await tx.projectService.create({
           data: {
             projectId: newProj.id,
             serviceType: 'BACKEND',
             provider: 'RENDER',
-            rootDirectory: backendService.rootDirectory || '/server',
-            buildCommand: backendService.buildCommand || 'npm install',
-            startCommand: backendService.startCommand || 'npm start',
-            healthCheckPath: backendService.healthCheckPath || '/health',
+            rootDirectory: safeBackend.rootDirectory || '/server',
+            buildCommand: safeBackend.buildCommand || 'npm install',
+            startCommand: safeBackend.startCommand || 'npm start',
+            healthCheckPath: safeBackend.healthCheckPath || '/health',
           },
         });
       }
 
       // 3. Create Frontend Service (Vercel)
-      if (frontendService) {
+      if (safeFrontend) {
         await tx.projectService.create({
           data: {
             projectId: newProj.id,
             serviceType: 'FRONTEND',
             provider: 'VERCEL',
-            rootDirectory: frontendService.rootDirectory || '/client',
-            buildCommand: frontendService.buildCommand || 'npm run build',
-            startCommand: frontendService.startCommand || 'npm run preview',
+            rootDirectory: safeFrontend.rootDirectory || '/client',
+            buildCommand: safeFrontend.buildCommand || 'npm run build',
+            startCommand: safeFrontend.startCommand || 'npm run preview',
           },
         });
       }

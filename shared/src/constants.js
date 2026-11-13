@@ -41,10 +41,16 @@ export const LOG_LEVEL = {
   ERROR: 'ERROR',
 };
 
+export const LOG_SOURCE = {
+  ORCHESTRATOR: 'ORCHESTRATOR',
+  PROVIDER: 'PROVIDER',
+};
+
 export const SOCKET_EVENTS = {
   // Client to Server
   JOIN_DEPLOYMENT: 'join_deployment',
   LEAVE_DEPLOYMENT: 'leave_deployment',
+  JOIN_NOTIFICATIONS: 'join_notifications',
 
   // Server to Client
   DEPLOYMENT_STATUS_CHANGED: 'deployment_status_changed',
@@ -52,6 +58,7 @@ export const SOCKET_EVENTS = {
   DEPLOYMENT_STEP_UPDATE: 'deployment_step_update',
   DEPLOYMENT_COMPLETED: 'deployment_completed',
   DEPLOYMENT_ERROR: 'deployment_error',
+  NOTIFICATION_CREATED: 'notification_created',
 };
 
 export const FRAMEWORK_PRESETS = {

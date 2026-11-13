@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import prisma from '../config/db.js';
+import { env } from '../config/env.js';
 
 const router = Router();
 
@@ -30,7 +31,7 @@ router.get('/health/db', async (req, res) => {
     res.status(503).json({
       success: false,
       status: 'DISCONNECTED',
-      error: error.message,
+      ...(env.isProduction ? {} : { error: 'Database connectivity check failed.' }),
       timestamp: new Date().toISOString(),
     });
   }

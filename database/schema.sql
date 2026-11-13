@@ -73,11 +73,17 @@ CREATE TABLE IF NOT EXISTS deployments (
     project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     status VARCHAR(30) NOT NULL DEFAULT 'QUEUED' 
         CHECK (status IN ('QUEUED', 'ANALYZING', 'DEPLOYING_BACKEND', 'HEALTH_CHECKING', 'DEPLOYING_FRONTEND', 'SUCCESS', 'FAILED', 'CANCELLED')),
+    attempt_number INTEGER NOT NULL DEFAULT 1,
+    retried_from_id UUID NULL REFERENCES deployments(id) ON DELETE SET NULL,
     commit_hash VARCHAR(40),
     commit_message TEXT,
     triggered_by VARCHAR(50) DEFAULT 'MANUAL',
     backend_url TEXT,
     frontend_url TEXT,
+    render_service_id VARCHAR(255),
+    render_deploy_id VARCHAR(255),
+    vercel_project_id VARCHAR(255),
+    vercel_deploy_id VARCHAR(255),
     duration_seconds INTEGER,
     error_message TEXT,
     started_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -103,8 +109,22 @@ CREATE TABLE IF NOT EXISTS deployment_logs (
     id BIGSERIAL PRIMARY KEY,
     deployment_id UUID NOT NULL REFERENCES deployments(id) ON DELETE CASCADE,
     log_level VARCHAR(10) DEFAULT 'INFO' CHECK (log_level IN ('DEBUG', 'INFO', 'WARN', 'ERROR')),
+    source VARCHAR(20) NOT NULL DEFAULT 'ORCHESTRATOR' CHECK (source IN ('ORCHESTRATOR', 'PROVIDER')),
     stage VARCHAR(50) NOT NULL,
     message TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 9. User Notifications (persistent)
+CREATE TABLE IF NOT EXISTS notifications (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    deployment_id UUID NULL REFERENCES deployments(id) ON DELETE SET NULL,
+    project_id UUID NULL REFERENCES projects(id) ON DELETE SET NULL,
+    type VARCHAR(50) NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    message TEXT NOT NULL,
+    is_read BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -112,8 +132,13 @@ CREATE TABLE IF NOT EXISTS deployment_logs (
 CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id);
 CREATE INDEX IF NOT EXISTS idx_deployments_project_id ON deployments(project_id);
 CREATE INDEX IF NOT EXISTS idx_deployments_status ON deployments(status);
+CREATE INDEX IF NOT EXISTS idx_deployments_retried_from_id ON deployments(retried_from_id);
+CREATE INDEX IF NOT EXISTS idx_deployments_started_at ON deployments(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deployment_logs_dep_id ON deployment_logs(deployment_id);
 CREATE INDEX IF NOT EXISTS idx_deployment_steps_dep_id ON deployment_steps(deployment_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_deployment_id ON notifications(deployment_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at DESC);
 
 -- ==============================================================================
 -- College Requirement: Database View demonstrating CTE, Aggregations & Window Functions

@@ -9,19 +9,19 @@ export function SocketProvider({ children }) {
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    // Connect to the backend Socket.IO gateway
-    const newSocket = io('http://localhost:5001', {
+    const token = localStorage.getItem('deplo_token');
+    // Same-origin connection works with Vite dev proxy and production; auth sent for room authorization.
+    const newSocket = io({
       transports: ['websocket', 'polling'],
       autoConnect: true,
+      auth: token ? { token } : {},
     });
 
     newSocket.on('connect', () => {
-      console.log('⚡ Connected to deplo.ai real-time socket:', newSocket.id);
       setConnected(true);
     });
 
     newSocket.on('disconnect', () => {
-      console.log('🔌 Disconnected from deplo.ai real-time socket');
       setConnected(false);
     });
 

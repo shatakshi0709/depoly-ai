@@ -2,6 +2,7 @@ import prisma from '../config/db.js';
 import { decrypt } from '../utils/crypto.js';
 import { getUserRepositories } from '../services/github.service.js';
 import { analyzeRepository } from '../services/analyzer.service.js';
+import { isNonEmptyString } from '../utils/validate.js';
 
 /**
  * List repositories accessible to the user.
@@ -71,14 +72,16 @@ export async function getRepositories(req, res, next) {
  */
 export async function analyze(req, res, next) {
   try {
-    const { repoUrl, branch = 'main' } = req.body;
+    const { repoUrl, branch = 'main' } = req.body || {};
 
-    if (!repoUrl) {
+    if (!isNonEmptyString(repoUrl) || repoUrl.length > 500) {
       return res.status(400).json({
         success: false,
-        message: 'Repository URL or full name (owner/repo) is required.',
+        message: 'A valid repository URL or full name is required.',
       });
     }
+
+    const safeBranch = isNonEmptyString(branch) ? branch.trim().slice(0, 100) : 'main';
 
     // Check if user has an OAuth token to pass for private repo access
     const oauth = await prisma.oAuthAccount.findFirst({
@@ -91,17 +94,14 @@ export async function analyze(req, res, next) {
     const token = oauth && oauth.accessTokenEnc ? decrypt(oauth.accessTokenEnc) : null;
 
     try {
-      const analysis = await analyzeRepository(repoUrl, branch, token);
+      const analysis = await analyzeRepository(repoUrl.trim(), safeBranch, token);
       return res.json({
         success: true,
         data: analysis,
       });
-    } catch (analysisError) {
-      // If live GitHub inspection fails (e.g. offline, rate-limit, or private without token),
-      // provide intelligent simulated analysis for demo repositories
-      console.warn(`Live GitHub scan failed for "${repoUrl}": ${analysisError.message}. Using intelligent heuristic fallback.`);
-      
-      const fallback = generateHeuristicFallback(repoUrl, branch);
+    } catch {
+      // If live GitHub inspection fails, provide heuristic fallback analysis.
+      const fallback = generateHeuristicFallback(repoUrl.trim(), safeBranch);
       return res.json({
         success: true,
         isFallback: true,
@@ -118,7 +118,7 @@ export async function analyze(req, res, next) {
  */
 function generateHeuristicFallback(repoUrl, branch) {
   const isPython = repoUrl.toLowerCase().includes('fastapi') || repoUrl.toLowerCase().includes('python');
-  
+
   return {
     repository: {
       fullName: repoUrl.replace('https://github.com/', ''),

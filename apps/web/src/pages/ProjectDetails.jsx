@@ -70,6 +70,16 @@ export function ProjectDetails() {
     }
   };
 
+  const handleRetryDeployment = async (deploymentId) => {
+    try {
+      const res = await api.post(`/projects/deployments/${deploymentId}/retry`);
+      const newId = res.data?.data?.id;
+      if (newId) navigate(`/deployments/${newId}`);
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed to retry deployment.');
+    }
+  };
+
   const handleAddEnv = async (e) => {
     e.preventDefault();
     if (!newKey || !newValue) return;
@@ -346,7 +356,10 @@ export function ProjectDetails() {
                 project.deployments.map((dep) => (
                   <tr key={dep.id} className="hover:bg-slate-900/50 transition">
                     <td className="px-5 py-3.5">
-                      <StatusBadge status={dep.status} />
+                      <div className="flex items-center gap-2">
+                        <StatusBadge status={dep.status} />
+                        {dep.attemptNumber > 1 && <span className="text-[10px] text-slate-500 font-mono">#{dep.attemptNumber}</span>}
+                      </div>
                     </td>
                     <td className="px-5 py-3.5">
                       <div className="font-mono text-white">{dep.commitHash || 'main-head'}</div>
@@ -359,12 +372,17 @@ export function ProjectDetails() {
                     <td className="px-5 py-3.5 text-slate-400">
                       {new Date(dep.startedAt).toLocaleString()}
                     </td>
-                    <td className="px-5 py-3.5 text-right">
+                    <td className="px-5 py-3.5 text-right space-x-3">
+                      {dep.status === 'FAILED' && (
+                        <button onClick={() => handleRetryDeployment(dep.id)} className="inline-flex items-center gap-1 text-amber-400 hover:text-amber-300 font-semibold transition">
+                          <span>Retry</span>
+                        </button>
+                      )}
                       <Link
                         to={`/deployments/${dep.id}`}
                         className="inline-flex items-center gap-1 text-emerald-400 hover:text-emerald-300 font-semibold transition"
                       >
-                        <span>Live Terminal</span>
+                        <span>View</span>
                         <ExternalLink className="w-3 h-3" />
                       </Link>
                     </td>

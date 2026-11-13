@@ -18,21 +18,29 @@ import healthRoutes from './routes/health.routes.js';
 import authRoutes from './routes/auth.routes.js';
 import projectRoutes from './routes/project.routes.js';
 import githubRoutes from './routes/github.routes.js';
+import notificationRoutes from './routes/notification.routes.js';
 
 const app = express();
 const server = http.createServer(app);
 
-// Initialize Socket.IO
-initSocketIO(server, env.CLIENT_URL);
+// Initialize Socket.IO with trusted origins
+initSocketIO(server, env.CORS_ORIGINS);
 
 // Middleware
-app.use(cors({
-  origin: [env.CLIENT_URL, 'http://localhost:5173', 'http://localhost:3000'],
+const corsOptions = {
+  origin(origin, callback) {
+    // Allow non-browser clients (no Origin) and trusted browser origins only.
+    if (!origin || env.CORS_ORIGINS.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Origin not allowed by CORS'));
+  },
   credentials: true,
-}));
+};
+app.use(cors(corsOptions));
 app.use(morgan(env.NODE_ENV === 'production' ? 'combined' : 'dev'));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '256kb' }));
+app.use(express.urlencoded({ extended: true, limit: '256kb' }));
 
 // Root welcome route
 app.get('/', (req, res) => {
@@ -49,6 +57,7 @@ app.use('/api/v1', healthRoutes);
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/projects', projectRoutes);
 app.use('/api/v1/github', githubRoutes);
+app.use('/api/v1/notifications', notificationRoutes);
 
 // Error Handling
 app.use(notFoundHandler);
