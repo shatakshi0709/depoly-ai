@@ -118,3 +118,4 @@ We followed modern Electron security guidelines:
    - In terminal: `npm run dev:desktop`.
    - Trigger a deployment inside the desktop window and minimize it.
    - Observe the **Native OS Desktop Notification** appear with audio when the deployment succeeds!
+

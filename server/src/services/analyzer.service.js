@@ -255,3 +255,4 @@ function determineOverallPreset(frontend, backend) {
   }
   return 'FULLSTACK_CUSTOM';
 }
+

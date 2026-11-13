@@ -158,3 +158,4 @@ function generateHeuristicFallback(repoUrl, branch) {
     },
   };
 }
+

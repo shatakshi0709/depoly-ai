@@ -7,6 +7,7 @@ import { Navbar } from './components/Navbar';
 // Pages
 import { Login } from './pages/Login';
 import { Register } from './pages/Register';
+import { AuthCallback } from './pages/AuthCallback';
 import { Dashboard } from './pages/Dashboard';
 import { NewProject } from './pages/NewProject';
 import { ProjectDetails } from './pages/ProjectDetails';
@@ -65,6 +66,8 @@ export function App() {
                     </PublicRoute>
                   }
                 />
+                {/* GitHub OAuth callback — public route, handles code exchange */}
+                <Route path="/auth/callback" element={<AuthCallback />} />
 
                 {/* Protected Application Routes */}
                 <Route
