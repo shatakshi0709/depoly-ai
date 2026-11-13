@@ -46,3 +46,4 @@ Thumbs.db
 # Prisma Generated Client
 prisma/client/
 
+apps/desktop/electron/preload.js
