@@ -139,4 +139,3 @@ export function NotificationCenter() {
     </div>
   );
 }
-JS

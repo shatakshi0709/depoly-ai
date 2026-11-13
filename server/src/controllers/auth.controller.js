@@ -207,6 +207,7 @@ export async function githubOAuthStart(req, res, next) {
     if (!env.GITHUB_CLIENT_ID) {
       return res.status(503).json({ success: false, message: 'GitHub OAuth is not configured on the server.' });
     }
+    // Signed, expiring state (HMAC over payload) provides CSRF protection and is verified on callback.
     const state = createOAuthState({ t: 'github_oauth' });
     const redirectUri = env.GITHUB_CALLBACK_URL;
     const params = new URLSearchParams({
@@ -219,6 +220,7 @@ export async function githubOAuthStart(req, res, next) {
       success: true,
       data: {
         state,
+        redirectUri,
         authorizeUrl: `https://github.com/login/oauth/authorize?${params.toString()}`,
       },
     });
@@ -246,11 +248,16 @@ export async function githubOAuthCallback(req, res, next) {
         message: 'A valid OAuth state is required.',
       });
     }
+    // Authoritative CSRF/state validation: signature and expiry must be valid.
     const stateCheck = verifyOAuthState(state);
     if (!stateCheck.ok) {
+      const message =
+        stateCheck.reason === 'expired'
+          ? 'OAuth session expired. Please try signing in again.'
+          : 'Invalid OAuth state. Please try signing in again.';
       return res.status(400).json({
         success: false,
-        message: 'Invalid or expired OAuth state. Please try signing in again.',
+        message,
       });
     }
 

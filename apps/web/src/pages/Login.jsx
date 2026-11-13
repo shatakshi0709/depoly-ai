@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { api } from '../api/client';
 import { Rocket, AlertCircle, ArrowRight } from 'lucide-react';
 import { GithubIcon } from '../components/GithubIcon';
 
@@ -9,6 +10,7 @@ export function Login() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [oauthLoading, setOauthLoading] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
 
@@ -27,11 +29,28 @@ export function Login() {
     }
   };
 
-  const handleGitHubOAuth = () => {
-    // If GITHUB_CLIENT_ID is set, redirect to GitHub OAuth
-    const clientId = import.meta.env.VITE_GITHUB_CLIENT_ID || 'Iv23liTestApp';
-    const redirectUri = encodeURIComponent(window.location.origin + '/auth/callback');
-    window.location.href = `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&scope=repo,read:user,user:email`;
+  const handleGitHubOAuth = async () => {
+    setError('');
+    setOauthLoading(true);
+    try {
+      // Request server-generated signed, expiring OAuth state and canonical authorize URL.
+      const res = await api.get('/auth/github/start');
+      const { state, authorizeUrl } = res.data?.data || {};
+      if (!state || !authorizeUrl) {
+        throw new Error('OAuth start failed');
+      }
+      // Store state for same-context validation hint (web/Electron when callback returns in-app).
+      try {
+        sessionStorage.setItem('deplo_oauth_state', state);
+      } catch {
+        // Storage may be unavailable; server-side signed-state verification remains authoritative.
+      }
+      window.location.href = authorizeUrl;
+    } catch (err) {
+      setError(err.response?.data?.message || 'Unable to start GitHub sign-in. Please try again.');
+    } finally {
+      setOauthLoading(false);
+    }
   };
 
   return (
@@ -59,10 +78,11 @@ export function Login() {
         <button
           onClick={handleGitHubOAuth}
           type="button"
-          className="w-full flex items-center justify-center gap-2.5 px-4 py-2.5 rounded-xl border border-slate-700 bg-slate-800/80 hover:bg-slate-800 text-white font-medium text-sm transition shadow-sm"
+          disabled={oauthLoading}
+          className="w-full flex items-center justify-center gap-2.5 px-4 py-2.5 rounded-xl border border-slate-700 bg-slate-800/80 hover:bg-slate-800 text-white font-medium text-sm transition shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
         >
           <GithubIcon className="w-4 h-4" />
-          <span>Continue with GitHub</span>
+          <span>{oauthLoading ? 'Redirecting to GitHub...' : 'Continue with GitHub'}</span>
         </button>
 
         <div className="relative flex items-center justify-center">

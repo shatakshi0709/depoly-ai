@@ -30,18 +30,35 @@ export function AuthCallback() {
       return;
     }
 
-    const expectedState = sessionStorage.getItem('deplo_oauth_state');
-    sessionStorage.removeItem('deplo_oauth_state');
-    if (!state || !expectedState || state !== expectedState) {
+    if (!state) {
       setStatus('error');
-      setMessage('OAuth state validation failed. Please try signing in again.');
+      setMessage('Missing OAuth state. Please try signing in again.');
+      return;
+    }
+
+    // Optional same-context hint: if we started in this browser context, ensure state matches.
+    // Do NOT block on absence/mismatch: in Electron the system browser may complete the callback in a
+    // different storage context. Authoritative CSRF protection is the server's signed+expiring state verification.
+    let expectedState = null;
+    try {
+      expectedState = sessionStorage.getItem('deplo_oauth_state');
+      sessionStorage.removeItem('deplo_oauth_state');
+    } catch {
+      expectedState = null;
+    }
+    if (expectedState && expectedState !== state) {
+      setStatus('error');
+      setMessage('OAuth session mismatch. Please try signing in again.');
       return;
     }
 
     async function exchangeCode() {
       try {
         const res = await api.post('/auth/github', { code, state });
-        const { token, user } = res.data.data;
+        const { token, user } = res.data?.data || {};
+        if (!token || !user) {
+          throw new Error('Invalid authentication response.');
+        }
 
         // Store auth token
         localStorage.setItem('deplo_token', token);
@@ -50,14 +67,18 @@ export function AuthCallback() {
         setStatus('success');
         setMessage('GitHub connected successfully! Redirecting to your dashboard...');
 
-        await refreshProfile();
+        try {
+          await refreshProfile();
+        } catch {
+          // Token/user already stored; profile refresh is best-effort.
+        }
 
         setTimeout(() => {
           navigate('/', { replace: true });
         }, 1200);
       } catch (err) {
         setStatus('error');
-        setMessage(err.response?.data?.message || 'Failed to exchange authorization code with GitHub.');
+        setMessage(err.response?.data?.message || 'Failed to complete GitHub sign-in. Please try again.');
       }
     }
 

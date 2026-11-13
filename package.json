@@ -29,6 +29,8 @@
   "license": "ISC",
   "devDependencies": {
     "concurrently": "^9.1.2"
+  },
+  "allowScripts": {
+    "electron@34.5.8": true
   }
 }
-
