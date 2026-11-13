@@ -4,6 +4,7 @@ import { DEPLOYMENT_STATUS, STEP_STATUS, SOCKET_EVENTS } from '@deplo/shared';
 import { env } from '../config/env.js';
 import { decrypt } from '../utils/crypto.js';
 import { isUuid } from '../utils/validate.js';
+import { sanitizeLogMessage, sanitizeText } from '../utils/sanitize.js';
 import {
   createRenderWebService,
   triggerRenderDeploy,
@@ -25,7 +26,7 @@ const SAFE_ERROR_PROD = 'Deployment failed. Check deployment logs for details.';
 function safeErrorMessage(err) {
   if (env.isProduction) return SAFE_ERROR_PROD;
   const msg = err?.message || 'Deployment pipeline failed.';
-  return String(msg).slice(0, 500);
+  return sanitizeText(msg, 500);
 }
 
 async function createNotification({ userId, deploymentId, projectId, type, title, message }) {
@@ -42,13 +43,17 @@ async function createNotification({ userId, deploymentId, projectId, type, title
 
 async function addLog(deploymentId, { stage, message, logLevel = 'INFO', source = 'ORCHESTRATOR' }) {
   try {
+    const safeStage = sanitizeText(stage || 'ORCHESTRATOR', 50) || 'ORCHESTRATOR';
+    const safeMessage = sanitizeLogMessage(message || '', 8000);
+    const safeLevel = ['DEBUG', 'INFO', 'WARN', 'ERROR'].includes(logLevel) ? logLevel : 'INFO';
+    const safeSource = source === 'PROVIDER' ? 'PROVIDER' : 'ORCHESTRATOR';
     const log = await prisma.deploymentLog.create({
       data: {
         deploymentId,
-        stage: String(stage || 'ORCHESTRATOR').slice(0, 50),
-        message: String(message || '').slice(0, 8000),
-        logLevel,
-        source,
+        stage: safeStage,
+        message: safeMessage,
+        logLevel: safeLevel,
+        source: safeSource,
       },
     });
     emitDeploymentLog(deploymentId, { stage: log.stage, message: log.message, logLevel: log.logLevel, source: log.source, createdAt: log.createdAt });
@@ -64,7 +69,7 @@ async function ingestProviderLogs(deploymentId, stage, entries = [], providerLab
     if (!entry?.message) continue;
     await addLog(deploymentId, {
       stage,
-      message: `[${providerLabel}] ${String(entry.message).slice(0, 4000)}`,
+      message: `[${sanitizeText(providerLabel, 30)}] ${sanitizeLogMessage(entry.message, 4000)}`,
       logLevel: entry.level === 'ERROR' ? 'ERROR' : 'INFO',
       source: 'PROVIDER',
     });

@@ -1,10 +1,20 @@
 import axios from 'axios';
 
+function resolveBaseURL() {
+  const configured = import.meta.env.VITE_API_URL;
+  if (configured) {
+    const base = configured.replace(/\/$/, '');
+    return base.endsWith('/api/v1') ? base : `${base}/api/v1`;
+  }
+  return '/api/v1';
+}
+
 export const api = axios.create({
-  baseURL: '/api/v1',
+  baseURL: resolveBaseURL(),
   headers: {
     'Content-Type': 'application/json',
   },
+  timeout: 30000,
 });
 
 // Attach Authorization Bearer token to every outgoing request
@@ -27,7 +37,7 @@ api.interceptors.response.use(
       // Clear token if expired or invalid
       localStorage.removeItem('deplo_token');
       localStorage.removeItem('deplo_user');
-      if (window.location.pathname !== '/login' && window.location.pathname !== '/register') {
+      if (window.location.pathname !== '/login' && window.location.pathname !== '/register' && !window.location.pathname.startsWith('/auth/callback')) {
         window.location.href = '/login';
       }
     }

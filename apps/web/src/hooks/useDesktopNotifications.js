@@ -7,33 +7,50 @@
 import { useEffect } from 'react';
 import { DEPLOYMENT_STATUS } from '@deplo/shared';
 
+function isElectron() {
+  return typeof window !== 'undefined' && Boolean(window.electronAPI?.isElectron);
+}
+
+function notify(title, body, status) {
+  if (isElectron() && typeof window.electronAPI.showNotification === 'function') {
+    window.electronAPI.showNotification({ title, body, status });
+    return;
+  }
+  if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+    try { new Notification(title, { body }); } catch { /* ignore */ }
+  }
+}
+
 export function useDesktopNotifications(deployment, projectName) {
   useEffect(() => {
-    if (!deployment || !deployment.status) return;
-
-    const isElectron = typeof window !== 'undefined' && Boolean(window.electronAPI?.isElectron);
+    if (!deployment?.status) return;
 
     if (deployment.status === DEPLOYMENT_STATUS.SUCCESS) {
-      const title = `Deployment Live! 🚀`;
-      const body = `"${projectName || 'Your app'}" has been deployed successfully to Render and Vercel.`;
-
-      if (isElectron) {
-        window.electronAPI.showNotification({ title, body, status: 'SUCCESS' });
+      notify(
+        'Deployment Successful',
+        `"${projectName || 'Your project'}" deployed successfully (backend + frontend).`,
+        'SUCCESS'
+      );
+      if (isElectron() && typeof window.electronAPI.updateBadge === 'function') {
         window.electronAPI.updateBadge(0);
-      } else if ('Notification' in window && Notification.permission === 'granted') {
-        new Notification(title, { body });
       }
     } else if (deployment.status === DEPLOYMENT_STATUS.FAILED) {
-      const title = `Deployment Failed ⚠️`;
-      const body = `Pipeline for "${projectName || 'Your app'}" failed: ${deployment.errorMessage || 'Unknown error'}`;
-
-      if (isElectron) {
-        window.electronAPI.showNotification({ title, body, status: 'FAILED' });
+      notify(
+        'Deployment Failed',
+        `Pipeline for "${projectName || 'Your project'}" failed. Check logs for details.`,
+        'FAILED'
+      );
+      if (isElectron() && typeof window.electronAPI.updateBadge === 'function') {
         window.electronAPI.updateBadge(1);
-      } else if ('Notification' in window && Notification.permission === 'granted') {
-        new Notification(title, { body });
       }
     }
-  }, [deployment?.status, projectName]);
+  }, [deployment?.status, deployment?.id, projectName]);
+}
+
+export function requestBrowserNotificationPermission() {
+  if (typeof window === 'undefined' || !('Notification' in window)) return;
+  if (Notification.permission === 'default') {
+    try { Notification.requestPermission(); } catch { /* ignore */ }
+  }
 }
 

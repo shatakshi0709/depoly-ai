@@ -14,6 +14,7 @@ export function AuthCallback() {
 
   useEffect(() => {
     const code = searchParams.get('code');
+    const state = searchParams.get('state');
     const errorParam = searchParams.get('error');
     const errorDescription = searchParams.get('error_description');
 
@@ -29,9 +30,17 @@ export function AuthCallback() {
       return;
     }
 
+    const expectedState = sessionStorage.getItem('deplo_oauth_state');
+    sessionStorage.removeItem('deplo_oauth_state');
+    if (!state || !expectedState || state !== expectedState) {
+      setStatus('error');
+      setMessage('OAuth state validation failed. Please try signing in again.');
+      return;
+    }
+
     async function exchangeCode() {
       try {
-        const res = await api.post('/auth/github', { code });
+        const res = await api.post('/auth/github', { code, state });
         const { token, user } = res.data.data;
 
         // Store auth token

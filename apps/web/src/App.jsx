@@ -12,6 +12,7 @@ import { Dashboard } from './pages/Dashboard';
 import { NewProject } from './pages/NewProject';
 import { ProjectDetails } from './pages/ProjectDetails';
 import { DeploymentLive } from './pages/DeploymentLive';
+import { DesktopConsole } from './pages/DesktopConsole';
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -99,6 +100,14 @@ export function App() {
                   element={
                     <ProtectedRoute>
                       <DeploymentLive />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/desktop"
+                  element={
+                    <ProtectedRoute>
+                      <DesktopConsole />
                     </ProtectedRoute>
                   }
                 />

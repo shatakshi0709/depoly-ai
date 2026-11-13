@@ -1,101 +1,150 @@
 /**
- * @file main.js
- * @description Electron Main Process for deplo.ai Desktop Dashboard.
- * Course Subject: Interactive System Development (Electron Architecture, IPC, Native APIs)
+ * Electron Main Process for deplo.ai Desktop Console (Phase 6).
+ * Secure-by-default: contextIsolation, sandbox, no nodeIntegration, restricted navigation/IPC.
  */
-
-import { app, BrowserWindow, ipcMain, Notification, Tray, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, Notification, shell, Menu } from 'electron';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 let mainWindow = null;
-let tray = null;
+
+const isDev = !app.isPackaged;
+const DEV_URL = process.env.ELECTRON_START_URL || 'http://localhost:5173';
+const DIST_INDEX = path.resolve(__dirname, '../../web/dist/index.html');
+
+function isAllowedNavigation(targetUrl) {
+  try {
+    const u = new URL(targetUrl);
+    const devOrigin = new URL(DEV_URL).origin;
+    if (isDev && u.origin === devOrigin) return true;
+    if (u.protocol === 'file:') return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 850,
-    minWidth: 1024,
-    minHeight: 700,
-    title: 'deplo.ai — Cloud Orchestration Desktop Console',
-    backgroundColor: '#020617', // slate-950
+    width: 1320,
+    height: 900,
+    minWidth: 1100,
+    minHeight: 720,
+    title: 'deplo.ai Desktop Console',
+    backgroundColor: '#020617',
+    show: false,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
-      nodeIntegration: false, // Security best practice
-      sandbox: false,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      spellcheck: false,
     },
   });
 
-  // Load local Vite dev server in development or bundled files from web package
-  const devUrl = 'http://localhost:5173';
-  if (process.env.NODE_ENV === 'development') {
-    mainWindow.loadURL(devUrl).catch(() => {
-      mainWindow.loadFile(path.join(__dirname, '../../web/dist/index.html'));
+  mainWindow.once('ready-to-show', () => mainWindow && mainWindow.show());
+
+  // Restrict in-app navigation; open external links in system browser via explicit IPC.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (!isAllowedNavigation(url)) {
+      event.preventDefault();
+      if (/^https?:/i.test(url)) shell.openExternal(url);
+    }
+  });
+
+  if (isDev) {
+    mainWindow.loadURL(DEV_URL).catch(() => {
+      if (fs.existsSync(DIST_INDEX)) mainWindow.loadFile(DIST_INDEX);
     });
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../../web/dist/index.html')).catch(() => {
-      mainWindow.loadURL(devUrl);
-    });
+    const packagedIndex = path.join(process.resourcesPath, 'web-dist', 'index.html');
+    if (fs.existsSync(packagedIndex)) {
+      mainWindow.loadFile(packagedIndex);
+    } else if (fs.existsSync(DIST_INDEX)) {
+      mainWindow.loadFile(DIST_INDEX);
+    } else {
+      mainWindow.loadURL(DEV_URL).catch(() => {});
+    }
   }
 
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
+  mainWindow.on('closed', () => { mainWindow = null; });
 }
 
-// ==============================================================================
-// IPC Communication Handlers (Interactive System Development)
-// ==============================================================================
+function createMenu() {
+  const template = [
+    ...(process.platform === 'darwin' ? [{ role: 'appMenu' }] : []),
+    { role: 'fileMenu' },
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+  ];
+  try { Menu.setApplicationMenu(Menu.buildFromTemplate(template)); } catch { /* ignore */ }
+}
 
-// 1. Native Desktop Notifications
-ipcMain.on('show-notification', (event, { title, body, status }) => {
-  if (Notification.isSupported()) {
-    const notification = new Notification({
-      title: title || 'deplo.ai Deployment Alert',
-      body: body || 'Pipeline status updated.',
-      silent: false,
-    });
-
-    notification.show();
-  }
+// IPC: native notifications (validated/sanitized payload)
+ipcMain.on('desktop:notify', (_event, payload = {}) => {
+  try {
+    if (!Notification.isSupported()) return;
+    const title = typeof payload.title === 'string' && payload.title ? payload.title.slice(0, 120) : 'deplo.ai';
+    const body = typeof payload.body === 'string' ? payload.body.slice(0, 500) : '';
+    new Notification({ title, body, silent: false }).show();
+  } catch { /* ignore */ }
 });
 
-// 2. Query System Information
-ipcMain.handle('get-system-info', () => {
-  return {
-    platform: process.platform,
-    arch: process.arch,
-    nodeVersion: process.versions.node,
-    electronVersion: process.versions.electron,
-    chromeVersion: process.versions.chrome,
-    totalMemory: `${Math.round(process.getSystemMemoryInfo().total / 1024 / 1024)} GB`,
-  };
+// IPC: dock badge (macOS)
+ipcMain.on('desktop:badge', (_event, count) => {
+  try {
+    if (app.dock) app.dock.setBadge(count > 0 ? String(count) : '');
+  } catch { /* ignore */ }
 });
 
-// 3. Update macOS Dock Badge
-ipcMain.on('update-badge', (event, { count }) => {
-  if (app.dock) {
-    app.dock.setBadge(count > 0 ? String(count) : '');
-  }
-});
+// IPC: system/app info (no secrets)
+ipcMain.handle('desktop:system-info', () => ({
+  platform: process.platform,
+  arch: process.arch,
+  electronVersion: process.versions.electron,
+  chromeVersion: process.versions.chrome,
+  nodeVersion: process.versions.node,
+  isPackaged: app.isPackaged,
+}));
 
-// Application Lifecycle
-app.whenReady().then(() => {
-  createWindow();
+ipcMain.handle('desktop:app-info', () => ({
+  name: app.getName(),
+  version: app.getVersion(),
+  locale: app.getLocale(),
+}));
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+ipcMain.handle('desktop:open-external', async (_event, url) => {
+  try {
+    const u = String(url || '');
+    if (/^https?:\/\//i.test(u)) {
+      await shell.openExternal(u);
+      return { ok: true };
     }
+    return { ok: false };
+  } catch {
+    return { ok: false };
+  }
+});
+
+app.whenReady().then(() => {
+  createMenu();
+  createWindow();
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  if (process.platform !== 'darwin') app.quit();
 });
