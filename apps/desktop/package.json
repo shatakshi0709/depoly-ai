@@ -1,0 +1,55 @@
+{
+  "name": "deplo-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "deplo.ai Electron Desktop Console (secure orchestration client)",
+  "main": "electron/main.js",
+  "type": "module",
+  "author": "deplo.ai",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "dev:desktop": "cross-env ELECTRON_START_URL=http://localhost:5173 electron .",
+    "build:renderer": "npm --prefix ../web run build:electron",
+    "pack": "npm run build:renderer && electron-builder --dir",
+    "dist": "npm run build:renderer && electron-builder"
+  },
+  "dependencies": {
+    "@deplo/shared": "*"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "34.5.8",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "ai.deplo.desktop",
+    "productName": "deplo.ai Desktop",
+    "electronVersion": "34.5.8",
+    "npmRebuild": false,
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../web/dist-electron",
+        "to": "web-dist",
+        "filter": ["**/*"]
+      }
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": ["dmg"]
+    },
+    "win": {
+      "target": ["dir"]
+    },
+    "linux": {
+      "target": ["dir"]
+    }
+  }
+}

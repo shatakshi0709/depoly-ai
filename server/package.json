@@ -1,0 +1,33 @@
+{
+  "name": "deplo-server",
+  "version": "1.0.0",
+  "description": "Backend API Gateway and Cloud Orchestrator for deplo.ai",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "db:generate": "prisma generate --schema=../database/schema.prisma",
+    "db:push": "prisma db push --schema=../database/schema.prisma",
+    "db:migrate": "prisma migrate dev --schema=../database/schema.prisma",
+    "db:seed": "node src/utils/seed.js"
+  },
+  "dependencies": {
+    "@deplo/shared": "*",
+    "@octokit/rest": "^21.1.1",
+    "@prisma/client": "^6.4.1",
+    "axios": "^1.8.1",
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9",
+    "prisma": "^6.4.1"
+  }
+}
+

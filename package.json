@@ -1,21 +1,36 @@
 {
-  "name": "depoly-ai",
+  "name": "deplo-ai",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "AI-Assisted Deployment & Cloud Orchestration Platform",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "server",
+    "shared"
+  ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "concurrently -n \"SERVER,WEB\" -c \"magenta,cyan\" \"npm run dev:server\" \"npm run dev:web\"",
+    "dev:server": "npm --workspace=server run dev",
+    "dev:web": "npm --workspace=apps/web run dev",
+    "dev:desktop": "npm --workspace=apps/desktop run dev",
+    "build": "npm run build --workspaces --if-present",
+    "test": "node server/test-e2e.js"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/shatakshi0709/depoly-ai.git"
-  },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "deployment",
+    "orchestration",
+    "render",
+    "vercel",
+    "electron",
+    "react",
+    "express"
+  ],
+  "author": "deplo.ai team",
   "license": "ISC",
-  "type": "commonjs",
-  "bugs": {
-    "url": "https://github.com/shatakshi0709/depoly-ai/issues"
+  "devDependencies": {
+    "concurrently": "^9.1.2"
   },
-  "homepage": "https://github.com/shatakshi0709/depoly-ai#readme"
+  "allowScripts": {
+    "electron@34.5.8": true
+  }
 }
