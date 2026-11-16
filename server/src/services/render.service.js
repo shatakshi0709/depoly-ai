@@ -477,3 +477,26 @@ export function sanitizeRenderError(err) {
     detail: sanitized,
   };
 }
+
+/**
+ * Add or update one service environment variable without replacing other keys.
+ */
+export async function upsertRenderServiceEnvVar(serviceId, key, value) {
+  const client = getRenderClient();
+  if (!client) {
+    if (env.ALLOW_SIMULATED_DEPLOYMENTS) return { simulated: true };
+    throw new Error('Render API key is not configured.');
+  }
+
+  try {
+    await client.put(
+      `/services/${encodeURIComponent(serviceId)}/env-vars/${encodeURIComponent(key)}`,
+      { value: String(value ?? '') }
+    );
+    return { simulated: false };
+  } catch (err) {
+    const renderErr = sanitizeRenderError(err);
+    throw new Error(`Render API environment update failed: ${renderErr.message}`);
+  }
+}
+
