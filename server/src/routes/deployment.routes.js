@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
   cancelDeployment,
+  downloadDeploymentLogs,
   getDeployment,
   getDeploymentHealth,
   getDeploymentLogs,
@@ -38,6 +39,9 @@ router.get('/:id', getDeployment);
 
 // GET /api/deploy/:id/logs — Paginated deployment logs (polling)
 router.get('/:id/logs', getDeploymentLogs);
+
+// GET /api/deploy/:id/logs/download — Download raw plain text log file
+router.get('/:id/logs/download', downloadDeploymentLogs);
 
 // GET /api/deploy/:id/stream — Server-Sent Events (SSE) live log stream
 router.get('/:id/stream', streamDeploymentLogs);

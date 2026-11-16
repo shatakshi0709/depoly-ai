@@ -1231,4 +1231,42 @@ export async function getDeploymentStats(req, res, next) {
   }
 }
 
+/**
+ * GET /api/deploy/:id/logs/download
+ * Export all deployment logs as a plain-text download.
+ */
+export async function downloadDeploymentLogs(req, res, next) {
+  try {
+    const { id } = req.params;
+    if (!isUuid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid deployment identifier.' });
+    }
+
+    const deployment = await prisma.deployment.findFirst({
+      where: { id, project: { userId: req.user.userId } },
+      select: { id: true, project: { select: { name: true } }, createdAt: true },
+    });
+
+    if (!deployment) {
+      return res.status(404).json({ success: false, message: 'Deployment not found.' });
+    }
+
+    const logs = await prisma.deploymentLog.findMany({
+      where: { deploymentId: id },
+      orderBy: { id: 'asc' },
+    });
+
+    const textContent = logs
+      .map((l) => `[${l.createdAt.toISOString()}] [${l.logLevel.padEnd(5)}] [${l.source}/${l.stage}] ${l.message}`)
+      .join('\n');
+
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="deplo-${deployment.project.name}-log-${id.slice(0, 8)}.txt"`);
+    res.send(textContent);
+  } catch (error) {
+    next(error);
+  }
+}
+
+
 
