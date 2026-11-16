@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import {
+  cancelDeployment,
   getDeployment,
   getDeploymentHealth,
   getDeploymentLogs,
@@ -45,5 +46,8 @@ router.get('/:id/urls', getDeploymentUrls);
 
 // POST /api/deploy/:id/retry — Retry a failed deployment
 router.post('/:id/retry', deployLimiter, retryDeployment);
+
+// POST /api/deploy/:id/cancel — Cancel an active deployment
+router.post('/:id/cancel', cancelDeployment);
 
 export default router;

@@ -1122,3 +1122,60 @@ export async function getProjectDeployments(req, res, next) {
     next(error);
   }
 }
+
+/**
+ * POST /api/deploy/:id/cancel
+ * Cancel an active in-flight deployment.
+ */
+export async function cancelDeployment(req, res, next) {
+  try {
+    const { id } = req.params;
+    if (!isUuid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid deployment identifier.' });
+    }
+
+    const deployment = await prisma.deployment.findFirst({
+      where: { id, project: { userId: req.user.userId } },
+      include: { project: true },
+    });
+
+    if (!deployment) {
+      return res.status(404).json({ success: false, message: 'Deployment not found.' });
+    }
+
+    const TERMINAL = [DEPLOYMENT_STATUS.SUCCESS, DEPLOYMENT_STATUS.FAILED, DEPLOYMENT_STATUS.CANCELLED];
+    if (TERMINAL.includes(deployment.status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot cancel a deployment in ${deployment.status} state.`,
+      });
+    }
+
+    const updated = await prisma.deployment.update({
+      where: { id },
+      data: {
+        status: DEPLOYMENT_STATUS.CANCELLED,
+        errorMessage: 'Deployment cancelled by user.',
+        completedAt: new Date(),
+      },
+    });
+
+    await addLog(id, {
+      stage: 'ORCHESTRATOR',
+      message: 'Deployment cancelled by user request.',
+      logLevel: 'WARN',
+      source: 'ORCHESTRATOR',
+    });
+
+    emitDeploymentEvent(id, SOCKET_EVENTS.DEPLOYMENT_STATUS_CHANGED, {
+      deploymentId: id,
+      status: DEPLOYMENT_STATUS.CANCELLED,
+      error: 'Deployment cancelled by user.',
+    });
+
+    res.json({ success: true, message: 'Deployment cancelled successfully.', data: updated });
+  } catch (error) {
+    next(error);
+  }
+}
+
