@@ -3,7 +3,7 @@ import http from 'http';
 import cors from 'cors';
 import morgan from 'morgan';
 
-import { env, isAllowedOrigin } from './config/env.js';
+import { env } from './config/env.js';
 import { testDbConnection } from './config/db.js';
 import { initSocketIO } from './sockets/socketManager.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
@@ -17,8 +17,10 @@ BigInt.prototype.toJSON = function () {
 import healthRoutes from './routes/health.routes.js';
 import authRoutes from './routes/auth.routes.js';
 import projectRoutes from './routes/project.routes.js';
+import deploymentRoutes from './routes/deployment.routes.js';
 import githubRoutes from './routes/github.routes.js';
 import notificationRoutes from './routes/notification.routes.js';
+import analyzeRoutes from './routes/analyze.routes.js';
 
 const app = express();
 const server = http.createServer(app);
@@ -34,8 +36,8 @@ initSocketIO(server, env.CORS_ORIGINS);
 // Middleware
 const corsOptions = {
   origin(origin, callback) {
-    // Allow non-browser clients (no Origin), the packaged desktop app, and trusted browser origins.
-    if (isAllowedOrigin(origin)) {
+    // Allow non-browser clients (no Origin) and trusted browser origins only.
+    if (!origin || env.CORS_ORIGINS.includes(origin)) {
       return callback(null, true);
     }
     return callback(new Error('Origin not allowed by CORS'));
@@ -79,8 +81,13 @@ app.get('/', (req, res) => {
 app.use('/api/v1', healthRoutes);
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/projects', projectRoutes);
+app.use('/api/projects', projectRoutes);
+app.use('/api/deploy', deploymentRoutes);
+app.use('/api/v1/deploy', deploymentRoutes);
 app.use('/api/v1/github', githubRoutes);
+app.use('/api/github', githubRoutes);            // Shared API contract: GET /api/github/repos
 app.use('/api/v1/notifications', notificationRoutes);
+app.use('/api', analyzeRoutes);                  // Shared API contract: POST /api/analyze, POST /api/config/generate
 
 // Error Handling
 app.use(notFoundHandler);
