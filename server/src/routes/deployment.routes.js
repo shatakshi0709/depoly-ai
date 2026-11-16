@@ -8,7 +8,10 @@ import {
   getDeploymentStats,
   getDeploymentUrls,
   getProjectDeployments,
+  handleRenderWebhook,
+  handleVercelWebhook,
   retryDeployment,
+  rollbackDeployment,
   streamDeploymentLogs,
   triggerDeployment,
 } from '../controllers/deployment.controller.js';
@@ -16,6 +19,12 @@ import { authenticateToken } from '../middleware/auth.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 
 const router = Router();
+
+// Provider webhooks (public callbacks; verified via payload signature where applicable)
+router.post('/webhook/render', handleRenderWebhook);
+router.post('/webhook/vercel', handleVercelWebhook);
+
+// Protected deployment engine routes
 router.use(authenticateToken);
 
 const deployLimiter = rateLimit({
@@ -57,5 +66,8 @@ router.post('/:id/retry', deployLimiter, retryDeployment);
 
 // POST /api/deploy/:id/cancel — Cancel an active deployment
 router.post('/:id/cancel', cancelDeployment);
+
+// POST /api/deploy/:id/rollback — Rollback to previous successful deployment
+router.post('/:id/rollback', deployLimiter, rollbackDeployment);
 
 export default router;

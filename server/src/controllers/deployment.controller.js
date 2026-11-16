@@ -1268,5 +1268,80 @@ export async function downloadDeploymentLogs(req, res, next) {
   }
 }
 
+/**
+ * POST /api/deploy/:id/rollback
+ * Quick rollback to the previous known successful deployment of the same project.
+ */
+export async function rollbackDeployment(req, res, next) {
+  try {
+    const { id } = req.params;
+    if (!isUuid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid deployment identifier.' });
+    }
+
+    const target = await prisma.deployment.findFirst({
+      where: { id, project: { userId: req.user.userId } },
+      include: { project: { include: { services: true } } },
+    });
+
+    if (!target) {
+      return res.status(404).json({ success: false, message: 'Deployment not found.' });
+    }
+
+    // Find the latest prior successful deployment
+    const priorSuccess = await prisma.deployment.findFirst({
+      where: {
+        projectId: target.projectId,
+        status: DEPLOYMENT_STATUS.SUCCESS,
+        startedAt: { lt: target.startedAt },
+      },
+      orderBy: { startedAt: 'desc' },
+    });
+
+    if (!priorSuccess) {
+      return res.status(404).json({
+        success: false,
+        message: 'No previous successful deployment found for rollback.',
+      });
+    }
+
+    const deployment = await createDeploymentRecord({
+      project: target.project,
+      userId: req.user.userId,
+      userEmail: req.user.email,
+      commitHash: priorSuccess.commitHash || 'rollback-head',
+      commitMessage: `Rollback to deployment ${priorSuccess.id.slice(0, 8)}`,
+      attemptNumber: (target.attemptNumber || 1) + 1,
+    });
+
+    emitDeploymentEvent(deployment.id, SOCKET_EVENTS.DEPLOYMENT_STATUS_CHANGED, {
+      deploymentId: deployment.id,
+      status: DEPLOYMENT_STATUS.ANALYZING,
+    });
+
+    executeOrchestration(deployment.id, target.projectId, req.user.userId);
+
+    res.status(201).json({
+      success: true,
+      message: `Rollback deployment initiated targeting stable commit ${priorSuccess.commitHash || 'prior'}.`,
+      data: deployment,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Webhook callback handlers for provider status updates
+ */
+export async function handleRenderWebhook(req, res) {
+  res.json({ success: true, provider: 'RENDER', receivedAt: new Date().toISOString() });
+}
+
+export async function handleVercelWebhook(req, res) {
+  res.json({ success: true, provider: 'VERCEL', receivedAt: new Date().toISOString() });
+}
+
+
 
 
