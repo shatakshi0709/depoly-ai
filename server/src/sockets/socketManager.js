@@ -1,7 +1,7 @@
 import { Server } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import { SOCKET_EVENTS } from '@deplo/shared';
-import { env, isAllowedOrigin } from '../config/env.js';
+import { env } from '../config/env.js';
 import prisma from '../config/db.js';
 
 let ioInstance = null;
@@ -22,8 +22,7 @@ export function initSocketIO(httpServer, corsOrigins = []) {
   ioInstance = new Server(httpServer, {
     cors: {
       origin(origin, callback) {
-        // Allow non-browser clients (no Origin), the packaged desktop app (file://), and trusted browser origins.
-        if (isAllowedOrigin(origin, allowedOrigins)) return callback(null, true);
+        if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
         return callback(new Error('Origin not allowed by Socket.IO CORS'));
       },
       methods: ['GET', 'POST'],
@@ -99,15 +98,17 @@ export function emitDeploymentEvent(deploymentId, eventName, data) {
 /**
  * Stream a log chunk in real time to subscribers.
  */
-export function emitDeploymentLog(deploymentId, { stage, message, logLevel = 'INFO', source = 'ORCHESTRATOR' }) {
+export function emitDeploymentLog(deploymentId, { id, stage, message, logLevel = 'INFO', source = 'ORCHESTRATOR', createdAt }) {
   if (!ioInstance) return;
   const payload = {
     deploymentId,
+    id,
     stage,
     message,
     logLevel,
     source,
-    timestamp: new Date().toISOString(),
+    createdAt: createdAt || new Date().toISOString(),
+    timestamp: createdAt || new Date().toISOString(),
   };
   ioInstance.to(`deployment:${deploymentId}`).emit(SOCKET_EVENTS.DEPLOYMENT_LOG, payload);
 }

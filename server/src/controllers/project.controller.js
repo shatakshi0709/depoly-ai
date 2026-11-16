@@ -6,12 +6,11 @@ function sanitizeServiceInput(input) {
   const pick = (v, max = 255) => (typeof v === 'string' ? v.trim().slice(0, max) : undefined);
   return {
     rootDirectory: pick(input.rootDirectory),
+    framework: pick(input.framework, 50),
     buildCommand: pick(input.buildCommand),
     startCommand: pick(input.startCommand),
+    outputDirectory: pick(input.outputDirectory),
     healthCheckPath: pick(input.healthCheckPath),
-    renderPlan: pick(input.renderPlan),
-    listensOnPortEnv: input.listensOnPortEnv === true,
-    listensOnAllInterfaces: input.listensOnAllInterfaces === true,
   };
 }
 
@@ -139,7 +138,6 @@ export async function createProject(req, res, next) {
     }
 
     const safeBackend = sanitizeServiceInput(backendService);
-    const backendIsProvisionable = isValidBackendServiceInput(backendService);
     const safeFrontend = sanitizeServiceInput(frontendService);
     const safeBranch = (typeof defaultBranch === 'string' ? defaultBranch.trim() : 'main').slice(0, 50) || 'main';
     const safePreset = (typeof detectedPreset === 'string' ? detectedPreset.trim() : 'REACT_VITE').slice(0, 50) || 'REACT_VITE';
@@ -160,19 +158,18 @@ export async function createProject(req, res, next) {
       // 2. Create Backend Service (Render) — only when a genuine backend was analyzed.
       // A phantom/empty backend payload (e.g. from a frontend-only analysis) is skipped
       // so it can never be persisted and later trigger Render provisioning.
-      if (safeBackend && backendIsProvisionable) {
+      if (safeBackend && isValidBackendServiceInput(backendService)) {
         await tx.projectService.create({
           data: {
             projectId: newProj.id,
             serviceType: 'BACKEND',
             provider: 'RENDER',
             rootDirectory: safeBackend.rootDirectory || '/server',
+            framework: safeBackend.framework || null,
             buildCommand: safeBackend.buildCommand || 'npm install',
             startCommand: safeBackend.startCommand || 'npm start',
+            outputDirectory: null,
             healthCheckPath: safeBackend.healthCheckPath || '/health',
-            renderPlan: safeBackend.renderPlan || 'free',
-            listensOnPortEnv: safeBackend.listensOnPortEnv || false,
-            listensOnAllInterfaces: safeBackend.listensOnAllInterfaces || false,
           },
         });
       }
@@ -185,8 +182,10 @@ export async function createProject(req, res, next) {
             serviceType: 'FRONTEND',
             provider: 'VERCEL',
             rootDirectory: safeFrontend.rootDirectory || '/client',
+            framework: safeFrontend.framework || detectedPreset,
             buildCommand: safeFrontend.buildCommand || 'npm run build',
             startCommand: safeFrontend.startCommand || 'npm run preview',
+            outputDirectory: safeFrontend.outputDirectory || null,
           },
         });
       }
