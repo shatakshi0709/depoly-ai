@@ -239,3 +239,76 @@ export async function getMetadata(req, res, next) {
   }
 }
 
+/**
+ * POST /api/config/generate
+ * Convert analysis output into a structured deployment configuration
+ * matching the shared API contract (deplo.ai team plan).
+ */
+export async function generateConfig(req, res, next) {
+  try {
+    const body = req.body || {};
+    const { analysis, repoUrl, branch = 'main', name, projectId, environmentVariables = {} } = body;
+
+    let analysisData = analysis;
+
+    if (!analysisData && isNonEmptyString(repoUrl)) {
+      const oauth = await prisma.oAuthAccount.findFirst({
+        where: { userId: req.user.userId, provider: 'github' },
+      });
+      const token = oauth?.accessTokenEnc ? decrypt(oauth.accessTokenEnc) : null;
+      analysisData = await analyzeRepository(repoUrl.trim(), branch, token);
+    }
+
+    if (!analysisData) {
+      return res.status(400).json({
+        success: false,
+        message: 'Either an analysis object or a repoUrl is required to generate a configuration.',
+      });
+    }
+
+    const repo = analysisData.repository?.fullName || (repoUrl ? repoUrl.replace('https://github.com/', '') : null);
+    if (!repo) {
+      return res.status(400).json({ success: false, message: 'Could not resolve repository full name from analysis.' });
+    }
+
+    const projectName = name || repo.split('/')[1] || 'deplo-project';
+
+    const configuration = {
+      projectId: projectId || null,
+      name: projectName,
+      repository: `https://github.com/${repo}`,
+      branch: branch || analysisData.repository?.branch || 'main',
+      frontend: {
+        provider: 'vercel',
+        rootDirectory: analysisData.frontend?.rootDirectory || '/client',
+        buildCommand: analysisData.frontend?.buildCommand || 'npm run build',
+        framework: analysisData.frontend?.framework || 'REACT_VITE',
+        outputDirectory: analysisData.frontend?.outputDirectory || 'dist',
+      },
+      backend: {
+        provider: 'render',
+        rootDirectory: analysisData.backend?.rootDirectory || '/server',
+        buildCommand: analysisData.backend?.buildCommand || 'npm install',
+        startCommand: analysisData.backend?.startCommand || 'npm start',
+        framework: analysisData.backend?.framework || 'EXPRESS_NODE',
+        healthCheckPath: analysisData.backend?.healthCheckPath || '/health',
+      },
+      environmentVariables: {
+        VITE_API_URL: '',
+        ...environmentVariables,
+      },
+    };
+
+    return res.json({
+      success: true,
+      data: {
+        configuration,
+        analysis: analysisData,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+
