@@ -2,20 +2,18 @@ import prisma from '../config/db.js';
 import { emitDeploymentEvent, emitDeploymentLog, emitUserNotification } from '../sockets/socketManager.js';
 import { DEPLOYMENT_STATUS, STEP_STATUS, SOCKET_EVENTS } from '@deplo/shared';
 import { env } from '../config/env.js';
-import { decrypt } from '../utils/crypto.js';
-import { isUuid, isNonEmptyString } from '../utils/validate.js';
+import { decrypt, encrypt } from '../utils/crypto.js';
+import { isUuid, isNonEmptyString, isSafeEnvKey, isValidServiceTarget } from '../utils/validate.js';
 import { sanitizeLogMessage, sanitizeText } from '../utils/sanitize.js';
 import {
   createRenderWebService,
   triggerRenderDeploy,
   pollRenderDeployStatus,
   getRenderService,
-  listRenderServices,
   fetchRenderDeployLogs,
   verifyBackendHealth,
   sanitizeRenderError,
-  RENDER_PLANS,
-  safeServiceName,
+  upsertRenderServiceEnvVar,
 } from '../services/render.service.js';
 import {
   ensureVercelProject,
@@ -23,16 +21,24 @@ import {
   triggerVercelDeploy,
   pollVercelDeployment,
   fetchVercelDeploymentLogs,
-  mapVercelFramework,
 } from '../services/vercel.service.js';
-import { analyzeRepository } from '../services/analyzer.service.js';
+import { verifyHttpHealth } from '../services/health.service.js';
 
 const SAFE_ERROR_PROD = 'Deployment failed. Check deployment logs for details.';
 
-function safeErrorMessage(err) {
-  if (env.isProduction) return SAFE_ERROR_PROD;
-  const msg = err?.message || 'Deployment pipeline failed.';
-  return sanitizeText(msg, 500);
+function validRelativeDirectory(value) {
+  return isNonEmptyString(value)
+    && value.length <= 255
+    && !/[\x00-\x1f]/.test(value)
+    && !String(value).replace(/\\/g, '/').split('/').includes('..');
+}
+
+function validGitHubRepository(repository) {
+  if (!isNonEmptyString(repository)) return null;
+  const value = repository.trim();
+  const match = value.match(/^(?:https?:\/\/github\.com\/|git@github\.com:)?([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i);
+  if (!match) return null;
+  return { fullName: `${match[1]}/${match[2]}`, url: `https://github.com/${match[1]}/${match[2]}.git` };
 }
 
 /**
@@ -46,20 +52,18 @@ export function validateBackendServiceConfig(backendService, repoUrl) {
     issues.push('No backend service configuration found from analyzer.');
     return issues;
   }
-  if (!isNonEmptyString(backendService.rootDirectory) || backendService.rootDirectory.trim().length === 0) {
-    issues.push('Backend rootDirectory is missing or empty.');
+  if (!validRelativeDirectory(backendService.rootDirectory)) {
+    issues.push('Backend rootDirectory is missing or invalid.');
   }
-  if (!isNonEmptyString(backendService.buildCommand) || backendService.buildCommand.trim().length === 0) {
+  if (!isNonEmptyString(backendService.buildCommand) || backendService.buildCommand.trim().length === 0 || backendService.buildCommand.length > 255) {
     issues.push('Backend buildCommand is missing or empty.');
   }
-  if (!isNonEmptyString(backendService.startCommand) || backendService.startCommand.trim().length === 0) {
+  if (!isNonEmptyString(backendService.startCommand) || backendService.startCommand.trim().length === 0 || backendService.startCommand.length > 255) {
     issues.push('Backend startCommand is missing or empty.');
   }
-  if (!isNonEmptyString(repoUrl) || !/^https?:\/\/github\.com\//i.test(repoUrl)) {
-    issues.push('Repository URL is missing or not a valid GitHub URL.');
-  }
-  if (!isNonEmptyString(backendService.healthCheckPath) || !String(backendService.healthCheckPath).startsWith('/')) {
-    issues.push('Backend healthCheckPath is missing or does not start with "/".');
+  if (!validGitHubRepository(repoUrl)) issues.push('Repository URL is missing or not a valid GitHub repository.');
+  if (backendService.healthCheckPath != null && (!isNonEmptyString(backendService.healthCheckPath) || backendService.healthCheckPath.length > 255 || !String(backendService.healthCheckPath).startsWith('/') || String(backendService.healthCheckPath).startsWith('//'))) {
+    issues.push('Backend healthCheckPath must be an absolute path beginning with one "/".');
   }
   return issues;
 }
@@ -78,6 +82,145 @@ export function isFrontendOnlyAnalysis(analysis) {
   if (analysis.applicationType === 'electron_desktop') return false;
   if (analysis.applicationType === 'frontend_only') return true;
   return !analysis.backend || analysis.backend.detected !== true;
+}
+
+export function validateFrontendServiceConfig(frontendService, repoUrl) {
+  const issues = [];
+  if (!frontendService) return ['No frontend service configuration found.'];
+  if (!validRelativeDirectory(frontendService.rootDirectory)) issues.push('Frontend rootDirectory is missing or invalid.');
+  if (!isNonEmptyString(frontendService.buildCommand) || frontendService.buildCommand.trim().length > 255) issues.push('Frontend buildCommand is missing or invalid.');
+  if (frontendService.framework != null && (!isNonEmptyString(frontendService.framework) || frontendService.framework.length > 50)) issues.push('Frontend framework is invalid.');
+  if (frontendService.outputDirectory != null && frontendService.outputDirectory !== '' && !validRelativeDirectory(frontendService.outputDirectory)) issues.push('Frontend outputDirectory is invalid.');
+  if (!validGitHubRepository(repoUrl)) issues.push('Repository URL is missing or not a valid GitHub repository.');
+  return issues;
+}
+
+export function validateDeploymentConfig(configuration) {
+  const issues = [];
+  const config = configuration?.configuration || configuration || {};
+  const repo = config.repository || config.repoUrl || config.githubRepoUrl;
+  if (!validGitHubRepository(repo)) issues.push('A valid GitHub repository is required.');
+  if (!isNonEmptyString(config.name) || config.name.trim().length > 100) issues.push('Project name is missing or invalid.');
+  if (config.branch != null && (!isNonEmptyString(config.branch) || config.branch.length > 50 || /[\x00-\x1f]/.test(config.branch))) issues.push('Branch is invalid.');
+
+  const backend = config.backend;
+  const frontend = config.frontend;
+  if (backend && String(backend.provider || 'render').toUpperCase() !== 'RENDER') issues.push('Backend provider must be Render.');
+  if (frontend && String(frontend.provider || 'vercel').toUpperCase() !== 'VERCEL') issues.push('Frontend provider must be Vercel.');
+  if (backend) issues.push(...validateBackendServiceConfig(backend, repo));
+  if (frontend) issues.push(...validateFrontendServiceConfig(frontend, repo));
+
+  const variables = config.environmentVariables;
+  if (variables != null) {
+    const entries = Array.isArray(variables) ? variables : (typeof variables === 'object' && !Array.isArray(variables) ? Object.entries(variables).map(([key, value]) => ({ key, value })) : null);
+    if (!entries) issues.push('environmentVariables must be an object or an array.');
+    else {
+      for (const item of entries) {
+        const key = Array.isArray(item) ? item[0] : item?.key;
+        const value = Array.isArray(item) ? item[1] : item?.value;
+        if (!isSafeEnvKey(key)) issues.push(`Invalid environment variable key: ${String(key || '').slice(0, 100)}.`);
+        if (value !== undefined && value !== null && typeof value !== 'string') issues.push(`Environment variable ${String(key || '').slice(0, 100)} must have a string value.`);
+        if (typeof value === 'string' && value.length > 8192) issues.push(`Environment variable ${key} exceeds 8192 characters.`);
+        if (!Array.isArray(variables) && typeof variables === 'object' && !Array.isArray(variables)) continue;
+        const target = item?.serviceTarget || item?.target || 'SHARED';
+        if (!isValidServiceTarget(target)) issues.push(`Environment variable ${key} has an invalid service target.`);
+        if (item?.isSecret != null && typeof item.isSecret !== 'boolean') issues.push(`Environment variable ${key} has an invalid isSecret flag.`);
+      }
+    }
+  }
+  return [...new Set(issues)];
+}
+
+function normalizeEnvironmentVariables(variables = {}) {
+  const items = Array.isArray(variables)
+    ? variables
+    : Object.entries(variables || {}).map(([key, value]) => ({ key, value }));
+  return items
+    .filter((item) => item?.key && typeof item.value === 'string' && item.value.length > 0)
+    .map((item) => {
+      const key = item.key.trim();
+      const target = item.serviceTarget || item.target || (/^(VITE_|NEXT_PUBLIC_)/.test(key) ? 'FRONTEND' : 'SHARED');
+      const isSecret = item.isSecret ?? !(/^(VITE_|NEXT_PUBLIC_)/.test(key));
+      return { key, valueEnc: encrypt(item.value), serviceTarget: target, isSecret };
+    });
+}
+
+async function resolveDeploymentProject({ body, userId }) {
+  const config = body?.configuration || body || {};
+  const requestedProjectId = config.projectId;
+  let project = null;
+  if (isUuid(requestedProjectId)) {
+    project = await prisma.project.findFirst({ where: { id: requestedProjectId, userId }, include: { services: true } });
+  }
+
+  const hasConfig = Boolean(config.backend || config.frontend || config.repository || config.repoUrl || config.githubRepoUrl);
+  if (!hasConfig) return project;
+
+  const issues = validateDeploymentConfig(config);
+  if (issues.length) return { validationIssues: issues };
+  const repo = validGitHubRepository(config.repository || config.repoUrl || config.githubRepoUrl);
+  const branch = config.branch || 'main';
+  if (project && project.githubRepoFullName.toLowerCase() !== repo.fullName.toLowerCase()) {
+    return { validationIssues: ['The supplied repository does not match the selected project.'] };
+  }
+  if (!project) {
+    project = await prisma.project.findFirst({
+      where: { userId, githubRepoFullName: { equals: repo.fullName, mode: 'insensitive' } },
+      include: { services: true },
+    });
+  }
+
+  const name = (config.name || project?.name || repo.fullName.split('/')[1]).trim().slice(0, 100);
+  const backend = config.backend || project?.services?.find((service) => service.serviceType === 'BACKEND');
+  const frontend = config.frontend || project?.services?.find((service) => service.serviceType === 'FRONTEND');
+  if (!backend || !frontend) return { validationIssues: ['Both backend and frontend configurations are required.'] };
+
+  return prisma.$transaction(async (tx) => {
+    const savedProject = project
+      ? await tx.project.update({
+          where: { id: project.id },
+          data: { name, githubRepoFullName: repo.fullName, githubRepoUrl: repo.url, defaultBranch: branch },
+        })
+      : await tx.project.create({
+          data: { userId, name, githubRepoFullName: repo.fullName, githubRepoUrl: repo.url, defaultBranch: branch },
+        });
+
+    for (const [serviceType, input] of [['BACKEND', backend], ['FRONTEND', frontend]]) {
+      await tx.projectService.upsert({
+        where: { projectId_serviceType: { projectId: savedProject.id, serviceType } },
+        update: {
+          provider: serviceType === 'BACKEND' ? 'RENDER' : 'VERCEL',
+          rootDirectory: input.rootDirectory,
+          framework: input.framework || null,
+          buildCommand: input.buildCommand || null,
+          startCommand: input.startCommand || null,
+          outputDirectory: input.outputDirectory || null,
+          healthCheckPath: input.healthCheckPath || '/health',
+        },
+        create: {
+          projectId: savedProject.id,
+          serviceType,
+          provider: serviceType === 'BACKEND' ? 'RENDER' : 'VERCEL',
+          rootDirectory: input.rootDirectory,
+          framework: input.framework || null,
+          buildCommand: input.buildCommand || null,
+          startCommand: input.startCommand || null,
+          outputDirectory: input.outputDirectory || null,
+          healthCheckPath: input.healthCheckPath || '/health',
+        },
+      });
+    }
+
+    const envInputs = normalizeEnvironmentVariables(config.environmentVariables);
+    for (const item of envInputs) {
+      await tx.environmentVariable.upsert({
+        where: { projectId_serviceTarget_key: { projectId: savedProject.id, serviceTarget: item.serviceTarget, key: item.key } },
+        update: { valueEnc: item.valueEnc, isSecret: item.isSecret },
+        create: { projectId: savedProject.id, ...item },
+      });
+    }
+    return tx.project.findUnique({ where: { id: savedProject.id }, include: { services: true } });
+  });
 }
 
 async function createNotification({ userId, deploymentId, projectId, type, title, message }) {
@@ -107,7 +250,7 @@ async function addLog(deploymentId, { stage, message, logLevel = 'INFO', source 
         source: safeSource,
       },
     });
-    emitDeploymentLog(deploymentId, { stage: log.stage, message: log.message, logLevel: log.logLevel, source: log.source, createdAt: log.createdAt });
+    emitDeploymentLog(deploymentId, { id: log.id.toString(), stage: log.stage, message: log.message, logLevel: log.logLevel, source: log.source, createdAt: log.createdAt });
     return log;
   } catch {
     return null;
@@ -151,7 +294,7 @@ async function failRemainingSteps(deploymentId, fromOrder) {
   try {
     const steps = await prisma.deploymentStep.findMany({ where: { deploymentId } });
     for (const s of steps) {
-      if (s.stepOrder >= fromOrder && s.status !== STEP_STATUS.SUCCESS) {
+      if (s.stepOrder === fromOrder && s.status !== STEP_STATUS.SUCCESS) {
         await updateStep(deploymentId, s.stepOrder, STEP_STATUS.FAILED);
       } else if (s.stepOrder > fromOrder && s.status === STEP_STATUS.PENDING) {
         await prisma.deploymentStep.update({ where: { id: s.id }, data: { status: STEP_STATUS.SKIPPED, completedAt: new Date() } });
@@ -185,6 +328,8 @@ async function createDeploymentRecord({ project, userId, userEmail, commitHash, 
       { name: 'Backend Health Verification', provider: 'RENDER', order: 3 },
       { name: 'Environment URL Injection', provider: 'VERCEL', order: 4 },
       { name: 'Frontend Build & Deploy', provider: 'VERCEL', order: 5 },
+      { name: 'Frontend Health Verification', provider: 'VERCEL', order: 6 },
+      { name: 'Backend CORS Update & Verification', provider: 'RENDER', order: 7 },
     ];
 
     await tx.deploymentStep.createMany({
@@ -232,7 +377,7 @@ function getProjectEnvVarsForProvider(projectEnvVars, target) {
     try {
       const value = decrypt(row.valueEnc);
       if (value == null) continue;
-      out.push({ key: row.key, value: String(value) });
+      out.push({ key: row.key, value: String(value), isSecret: Boolean(row.isSecret) });
     } catch {
       // skip undecryptable values
     }
@@ -242,16 +387,21 @@ function getProjectEnvVarsForProvider(projectEnvVars, target) {
 
 export async function triggerDeployment(req, res, next) {
   try {
-    const { projectId, commitHash = 'main-head', commitMessage = 'Manual deployment trigger' } = req.body || {};
-    if (!isUuid(projectId)) {
-      return res.status(400).json({ success: false, message: 'A valid project identifier is required.' });
+    const body = req.body || {};
+    const { commitHash = 'main-head', commitMessage = 'Manual deployment trigger' } = body;
+    const resolved = await resolveDeploymentProject({ body, userId: req.user.userId });
+    if (resolved?.validationIssues) {
+      return res.status(400).json({ success: false, message: 'Invalid deployment configuration.', errors: resolved.validationIssues });
     }
-
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, userId: req.user.userId },
-      include: { services: true },
-    });
+    const project = resolved;
     if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
+    const backendService = project.services?.find((service) => service.serviceType === 'BACKEND');
+    const frontendService = project.services?.find((service) => service.serviceType === 'FRONTEND');
+    const issues = [
+      ...validateBackendServiceConfig(backendService, project.githubRepoUrl),
+      ...validateFrontendServiceConfig(frontendService, project.githubRepoUrl),
+    ];
+    if (issues.length) return res.status(400).json({ success: false, message: 'Invalid deployment configuration.', errors: issues });
 
     const deployment = await createDeploymentRecord({
       project,
@@ -269,7 +419,7 @@ export async function triggerDeployment(req, res, next) {
 
     executeOrchestration(deployment.id, project.id, req.user.userId);
 
-    res.status(201).json({ success: true, message: 'Deployment pipeline initiated.', data: deployment });
+    res.status(201).json({ success: true, message: 'Deployment pipeline initiated.', data: { ...deployment, projectId: project.id } });
   } catch (error) {
     next(error);
   }
@@ -293,6 +443,14 @@ export async function retryDeployment(req, res, next) {
     if (original.status !== DEPLOYMENT_STATUS.FAILED) {
       return res.status(400).json({ success: false, message: 'Only failed deployments can be retried.' });
     }
+
+    const backendService = original.project.services?.find((service) => service.serviceType === 'BACKEND');
+    const frontendService = original.project.services?.find((service) => service.serviceType === 'FRONTEND');
+    const issues = [
+      ...validateBackendServiceConfig(backendService, original.project.githubRepoUrl),
+      ...validateFrontendServiceConfig(frontendService, original.project.githubRepoUrl),
+    ];
+    if (issues.length) return res.status(400).json({ success: false, message: 'Invalid deployment configuration.', errors: issues });
 
     const nextAttempt = (original.attemptNumber || 1) + 1;
     const deployment = await createDeploymentRecord({
@@ -355,6 +513,70 @@ export async function getDeployment(req, res, next) {
   }
 }
 
+export async function getDeploymentLogs(req, res, next) {
+  try {
+    const { id } = req.params;
+    if (!isUuid(id)) return res.status(400).json({ success: false, message: 'Invalid deployment identifier.' });
+    const deployment = await prisma.deployment.findFirst({
+      where: { id, project: { userId: req.user.userId } },
+      select: { id: true },
+    });
+    if (!deployment) return res.status(404).json({ success: false, message: 'Deployment not found.' });
+
+    const rawLimit = Number.parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(500, rawLimit)) : 100;
+    const after = req.query.after == null ? null : String(req.query.after);
+    if (after != null && !/^\d+$/.test(after)) return res.status(400).json({ success: false, message: 'Invalid log cursor.' });
+    const logs = await prisma.deploymentLog.findMany({
+      where: { deploymentId: id, ...(after ? { id: { gt: BigInt(after) } } : {}) },
+      orderBy: { id: 'asc' },
+      take: limit,
+    });
+    const data = logs.map((log) => ({ ...log, id: log.id.toString() }));
+    res.json({ success: true, data, nextCursor: data.length === limit ? data[data.length - 1].id : null });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getDeploymentHealth(req, res, next) {
+  try {
+    const { id } = req.params;
+    if (!isUuid(id)) return res.status(400).json({ success: false, message: 'Invalid deployment identifier.' });
+    const deployment = await prisma.deployment.findFirst({
+      where: { id, project: { userId: req.user.userId } },
+      include: { project: { include: { services: true } } },
+    });
+    if (!deployment) return res.status(404).json({ success: false, message: 'Deployment not found.' });
+
+    const backendService = deployment.project.services.find((service) => service.serviceType === 'BACKEND');
+    const checks = await Promise.all([
+      deployment.backendUrl
+        ? env.ALLOW_SIMULATED_DEPLOYMENTS && /sim-api-/.test(deployment.backendUrl)
+          ? Promise.resolve({ healthy: true, simulated: true, url: new URL(backendService?.healthCheckPath || '/health', deployment.backendUrl).toString(), statusCode: 200 })
+          : verifyHttpHealth(new URL(backendService?.healthCheckPath || '/health', deployment.backendUrl).toString(), { maxRetries: 2, delayMs: 500, timeoutMs: 5000 })
+        : Promise.resolve({ healthy: false, error: 'Backend URL is not available.', url: null }),
+      deployment.frontendUrl
+        ? env.ALLOW_SIMULATED_DEPLOYMENTS && /sim-.*\.vercel\.app/.test(deployment.frontendUrl)
+          ? Promise.resolve({ healthy: true, simulated: true, url: deployment.frontendUrl, statusCode: 200 })
+          : verifyHttpHealth(deployment.frontendUrl, { maxRetries: 2, delayMs: 500, timeoutMs: 5000 })
+        : Promise.resolve({ healthy: false, error: 'Frontend URL is not available.', url: null }),
+    ]);
+    res.json({
+      success: true,
+      data: {
+        deploymentId: id,
+        healthy: checks.every((check) => check.healthy),
+        backend: checks[0],
+        frontend: checks[1],
+        checkedAt: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 async function executeOrchestration(deploymentId, projectId, userId) {
   const startTime = Date.now();
   let currentStepOrder = 1;
@@ -366,157 +588,13 @@ async function executeOrchestration(deploymentId, projectId, userId) {
     });
     if (!project) throw new Error('Project not found for deployment execution.');
 
-    // Step 1: Repository inspection (orchestration) — re-run analyzer to get fresh data.
-    // Do NOT trust stale DB records; always re-analyze the live repository to avoid
-    // deploying Electron desktop apps as Render web services, or creating duplicate services.
+    const backendService = project.services?.find((s) => s.serviceType === 'BACKEND');
+    const frontendService = project.services?.find((s) => s.serviceType === 'FRONTEND');
+
+    // Step 1: Repository inspection (orchestration)
     currentStepOrder = 1;
     await addLog(deploymentId, { stage: 'GITHUB', source: 'ORCHESTRATOR', message: `Repository: ${project.githubRepoFullName} (branch: ${project.defaultBranch})` });
-
-    // Re-run analyzer to get fresh repository analysis.
-    let analysis;
-    try {
-      const oauth = await prisma.oAuthAccount.findFirst({
-        where: { userId, provider: 'github' },
-      });
-      const token = oauth && oauth.accessTokenEnc ? decrypt(oauth.accessTokenEnc) : null;
-      analysis = await analyzeRepository(project.githubRepoUrl, project.defaultBranch, token);
-    } catch (analysisErr) {
-      throw new Error(`Repository analysis failed: ${analysisErr.message}`);
-    }
-
-    // Reject Electron-only desktop applications — they cannot run as Render web services.
-    if (analysis.applicationType === 'electron_desktop') {
-      throw new Error(
-        analysis.error ||
-          'This repository is a desktop Electron application and cannot run as a Render web service. ' +
-          'Select a backend/API project instead.',
-      );
-    }
-
-    // Reject frontend-only repositories from Render provisioning — they go to Vercel only.
-    // Uses a defensive predicate so a missing/undetected backend can never reach Render.
-    if (isFrontendOnlyAnalysis(analysis)) {
-      await addLog(deploymentId, { stage: 'ANALYZER', source: 'ORCHESTRATOR', message: `Frontend-only repository detected: ${analysis.frontend?.rootDirectory || '/'} (${analysis.frontend?.framework || 'unknown'})` });
-      await addLog(deploymentId, { stage: 'ANALYZER', source: 'ORCHESTRATOR', message: 'Skipping Render backend provisioning — frontend-only project will deploy to Vercel.' });
-      await updateStep(deploymentId, 1, STEP_STATUS.SUCCESS);
-
-      // Skip directly to Vercel frontend deployment
-      const freshFrontend = analysis.frontend;
-      await addLog(deploymentId, { stage: 'VERCEL', source: 'ORCHESTRATOR', message: `Preparing Vercel project for frontend-only repository "${project.name}"...` });
-
-      const vercelProject = await ensureVercelProject({
-        name: project.name,
-        repoUrl: project.githubRepoUrl,
-        rootDir: freshFrontend?.rootDirectory || '/',
-        buildCommand: freshFrontend?.buildCommand || 'npm run build',
-        outputDirectory: freshFrontend?.outputDirectory || 'dist',
-        framework: mapVercelFramework(freshFrontend?.framework),
-      });
-
-      const frontendEnvVars = getProjectEnvVarsForProvider(project.envVariables, 'FRONTEND')
-        .filter((e) => e.key !== 'VITE_API_URL');
-      // Frontend-only project: there is no backend, so there is no live VITE_API_URL to
-      // inject. Sending it with a null value is rejected by the Vercel API (HTTP 400),
-      // so it is omitted entirely here.
-      const envVarsToSet = frontendEnvVars;
-      const envResult = await upsertVercelEnvVars(vercelProject.projectId || vercelProject.name || project.name, envVarsToSet);
-      await prisma.deployment.update({ where: { id: deploymentId }, data: { vercelProjectId: vercelProject.projectId || vercelProject.name || null } });
-
-      if (envResult.simulated || vercelProject.simulated) {
-        await addLog(deploymentId, { stage: 'VERCEL', source: 'ORCHESTRATOR', logLevel: 'WARN', message: 'SIMULATED (dev mode): Vercel project/env propagation simulated.' });
-      } else {
-        await addLog(deploymentId, { stage: 'VERCEL', source: 'ORCHESTRATOR', message: `Vercel environment variables propagated (${envVarsToSet.length} keys, values not logged).` });
-      }
-      await updateStep(deploymentId, 2, STEP_STATUS.SUCCESS, vercelProject.projectId || null);
-
-      // Deploy frontend to Vercel
-      currentStepOrder = 3;
-      await prisma.deployment.update({ where: { id: deploymentId }, data: { status: DEPLOYMENT_STATUS.DEPLOYING_FRONTEND } });
-      emitDeploymentEvent(deploymentId, SOCKET_EVENTS.DEPLOYMENT_STATUS_CHANGED, { deploymentId, status: DEPLOYMENT_STATUS.DEPLOYING_FRONTEND });
-      await updateStep(deploymentId, 3, STEP_STATUS.RUNNING);
-      await addLog(deploymentId, { stage: 'VERCEL', source: 'ORCHESTRATOR', message: 'Triggering Vercel frontend deployment...' });
-
-      const vercelResult = await triggerVercelDeploy({
-        name: project.name,
-        repoUrl: project.githubRepoUrl,
-        branch: project.defaultBranch,
-        rootDir: freshFrontend?.rootDirectory || '/',
-        buildCommand: freshFrontend?.buildCommand || 'npm run build',
-        outputDirectory: freshFrontend?.outputDirectory || 'dist',
-        framework: mapVercelFramework(freshFrontend?.framework),
-        projectId: vercelProject.projectId,
-      });
-
-      await prisma.deployment.update({
-        where: { id: deploymentId },
-        data: { vercelDeployId: vercelResult.deploymentId || null, vercelProjectId: vercelProject.projectId || vercelProject.projectId || null },
-      });
-
-      if (vercelResult.simulated) {
-        await addLog(deploymentId, { stage: 'VERCEL', source: 'ORCHESTRATOR', logLevel: 'WARN', message: 'SIMULATED (dev mode): Vercel deployment simulated.' });
-        await addLog(deploymentId, { stage: 'VERCEL', source: 'PROVIDER', message: '[Vercel][SIMULATED] Build completed (simulated).' });
-      }
-
-      let finalFrontendUrl = vercelResult.url || null;
-      if (env.VERCEL_API_KEY && vercelResult.deploymentId && !vercelResult.simulated) {
-        await addLog(deploymentId, { stage: 'VERCEL', source: 'ORCHESTRATOR', message: 'Polling Vercel deployment readiness...' });
-        const vercelStatus = await pollVercelDeployment(vercelResult.deploymentId, { timeoutMs: 12 * 60 * 1000, intervalMs: 10000 });
-        const vLogs = await fetchVercelDeploymentLogs(vercelResult.deploymentId);
-        await ingestProviderLogs(deploymentId, 'VERCEL', vLogs, 'Vercel');
-        if (vercelStatus.timedOut) throw new Error('Vercel deployment timed out before reaching READY state.');
-        if (vercelStatus.readyState !== 'READY') {
-          throw new Error(`Vercel deployment failed (state: ${vercelStatus.readyState || 'unknown'}).`);
-        }
-        finalFrontendUrl = vercelStatus.url || finalFrontendUrl;
-        await addLog(deploymentId, { stage: 'VERCEL', source: 'ORCHESTRATOR', message: 'Vercel reports deployment state: READY.' });
-      }
-
-      if (!finalFrontendUrl) throw new Error('Frontend deployment URL could not be determined from provider response.');
-
-      await addLog(deploymentId, { stage: 'VERCEL', source: 'ORCHESTRATOR', message: `Frontend deployment URL: ${finalFrontendUrl}` });
-      await updateStep(deploymentId, 3, STEP_STATUS.SUCCESS, vercelResult.deploymentId);
-
-      // Success
-      const completedAt = new Date();
-      const durationSeconds = Math.round((Date.now() - startTime) / 1000);
-      const finalized = await prisma.deployment.update({
-        where: { id: deploymentId },
-        data: {
-          status: DEPLOYMENT_STATUS.SUCCESS,
-          frontendUrl: finalFrontendUrl,
-          backendUrl: null,
-          durationSeconds,
-          completedAt,
-          errorMessage: null,
-        },
-      });
-
-      await addLog(deploymentId, { stage: 'ORCHESTRATOR', source: 'ORCHESTRATOR', message: `Pipeline completed in ${durationSeconds} seconds.` });
-      await createNotification({
-        userId,
-        deploymentId,
-        projectId,
-        type: 'DEPLOYMENT_SUCCESS',
-        title: 'Deployment successful',
-        message: `"${project.name}" deployed successfully${finalized.attemptNumber > 1 ? ` (attempt #${finalized.attemptNumber})` : ''}.`,
-      });
-
-      emitDeploymentEvent(deploymentId, SOCKET_EVENTS.DEPLOYMENT_STATUS_CHANGED, {
-        deploymentId,
-        status: DEPLOYMENT_STATUS.SUCCESS,
-        backendUrl: null,
-        frontendUrl: finalFrontendUrl,
-        durationSeconds,
-      });
-      emitDeploymentEvent(deploymentId, SOCKET_EVENTS.DEPLOYMENT_COMPLETED, finalized);
-      return;
-    }
-
-    // Use fresh analyzer data, not stale DB records
-    const freshBackend = analysis.backend;
-    const freshFrontend = analysis.frontend;
-
-    await addLog(deploymentId, { stage: 'ANALYZER', source: 'ORCHESTRATOR', message: `Backend: ${freshBackend?.rootDirectory || '/server'} (${freshBackend?.framework || 'unknown'}), Frontend: ${freshFrontend?.rootDirectory || '/client'} (${freshFrontend?.framework || 'unknown'})` });
+    await addLog(deploymentId, { stage: 'ANALYZER', source: 'ORCHESTRATOR', message: `Backend: ${backendService?.rootDirectory || '/server'}, Frontend: ${frontendService?.rootDirectory || '/client'}` });
     await updateStep(deploymentId, 1, STEP_STATUS.SUCCESS);
 
     // Step 2: Render backend deploy
@@ -529,7 +607,7 @@ async function executeOrchestration(deploymentId, projectId, userId) {
     await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', message: `Provisioning backend service on Render for "${project.name}"...` });
 
     // Validate analyzer output against basic sanity rules before provider provisioning.
-    const configIssues = validateBackendServiceConfig(freshBackend, project.githubRepoUrl);
+    const configIssues = validateBackendServiceConfig(backendService, project.githubRepoUrl);
     if (configIssues.length > 0) {
       throw new Error(`Invalid backend service configuration: ${configIssues.join('; ')}`);
     }
@@ -538,6 +616,7 @@ async function executeOrchestration(deploymentId, projectId, userId) {
     // instead of creating a duplicate. Only provision a new service when none exists.
     let renderServiceId = null;
     let renderDeployId = null;
+    let renderResult = null;
     const priorDeployments = await prisma.deployment.findMany({
       where: { projectId, renderServiceId: { not: null } },
       orderBy: { startedAt: 'desc' },
@@ -545,8 +624,8 @@ async function executeOrchestration(deploymentId, projectId, userId) {
       select: { id: true, renderServiceId: true, renderDeployId: true, status: true, attemptNumber: true },
     });
 
-    if (priorDeployments.length > 0) {
-      const prior = priorDeployments[0];
+    const prior = priorDeployments.find((deployment) => !String(deployment.renderServiceId).startsWith('sim-'));
+    if (prior) {
       renderServiceId = prior.renderServiceId;
       renderDeployId = prior.renderDeployId || null;
       await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', message: `Reusing existing Render service ${renderServiceId} from prior deployment ${prior.id} (attempt #${prior.attemptNumber}).` });
@@ -554,6 +633,9 @@ async function executeOrchestration(deploymentId, projectId, userId) {
       // Trigger a new deploy on the existing service when we have a live API key.
       if (env.RENDER_API_KEY && renderServiceId) {
         try {
+          for (const variable of backendEnvVars) {
+            await upsertRenderServiceEnvVar(renderServiceId, variable.key, variable.value);
+          }
           const t = await triggerRenderDeploy(renderServiceId);
           renderDeployId = t.deployId;
           await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', message: `Triggered new deploy ${renderDeployId} on existing Render service ${renderServiceId}.` });
@@ -564,63 +646,50 @@ async function executeOrchestration(deploymentId, projectId, userId) {
         }
       }
     } else {
-      // Before creating a new Render service, check if one with the same name already exists
-      // in the authenticated Render workspace. Service names must be unique across the account.
-      let existingService = null;
-      if (env.RENDER_API_KEY) {
+      renderResult = await createRenderWebService({
+        name: project.name,
+        repoUrl: project.githubRepoUrl,
+        branch: project.defaultBranch,
+        rootDir: backendService?.rootDirectory || '/server',
+        buildCommand: backendService?.buildCommand || 'npm install',
+        startCommand: backendService?.startCommand || 'npm start',
+        healthCheckPath: backendService?.healthCheckPath || '/health',
+        envVars: backendEnvVars,
+      });
+
+      renderServiceId = renderResult.serviceId || null;
+      renderDeployId = renderResult.deployId || null;
+
+      await prisma.deployment.update({
+        where: { id: deploymentId },
+        data: { renderServiceId: renderServiceId || null, renderDeployId: renderDeployId || null },
+      });
+
+      if (renderResult.simulated) {
+        await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', logLevel: 'WARN', message: 'SIMULATED (dev mode): Render service/deploy created via explicit simulation, not a real provider deployment.' });
+      }
+
+      if (!renderDeployId && renderServiceId && env.RENDER_API_KEY) {
         try {
-          const services = await listRenderServices();
-          existingService = services.find((s) => s.name === safeServiceName(project.name));
-          if (existingService) {
-            await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', message: `Found existing Render service ${existingService.id} (${existingService.name}) in workspace — reusing instead of creating duplicate.` });
-            renderServiceId = existingService.id;
-          }
-        } catch (listErr) {
-          await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', logLevel: 'WARN', message: `Could not list Render services: ${sanitizeText(listErr.message, 200)}` });
+          const t = await triggerRenderDeploy(renderServiceId);
+          renderDeployId = t.deployId;
+          await prisma.deployment.update({ where: { id: deploymentId }, data: { renderDeployId } });
+        } catch {
+          // continue; polling by service latest deploy may be needed in future enhancement
         }
       }
 
-      if (!renderServiceId) {
-        const renderResult = await createRenderWebService({
-          name: project.name,
-          repoUrl: project.githubRepoUrl,
-          branch: project.defaultBranch,
-          rootDir: freshBackend?.rootDirectory || '/server',
-          buildCommand: freshBackend?.buildCommand || 'npm install',
-          startCommand: freshBackend?.startCommand || 'npm start',
-          envVars: backendEnvVars,
-          plan: freshBackend?.renderPlan || RENDER_PLANS.FREE,
-          explicitPaidPlan: false,
-        });
-
-        renderServiceId = renderResult.serviceId || null;
-        renderDeployId = renderResult.deployId || null;
-
-        await prisma.deployment.update({
-          where: { id: deploymentId },
-          data: { renderServiceId: renderServiceId || null, renderDeployId: renderDeployId || null },
-        });
-
-        if (renderResult.simulated) {
-          await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', logLevel: 'WARN', message: 'SIMULATED (dev mode): Render service/deploy created via explicit simulation, not a real provider deployment.' });
-        }
-
-        if (!renderDeployId && renderServiceId && env.RENDER_API_KEY) {
-          try {
-            const t = await triggerRenderDeploy(renderServiceId);
-            renderDeployId = t.deployId;
-            await prisma.deployment.update({ where: { id: deploymentId }, data: { renderDeployId } });
-          } catch {
-            // continue; polling by service latest deploy may be needed in future enhancement
-          }
-        }
-
-        await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', message: `Render service reported (service: ${renderServiceId || 'n/a'}${renderDeployId ? `, deploy: ${renderDeployId}` : ''}).` });
-      }
+      await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', message: `Render service reported (service: ${renderServiceId || 'n/a'}${renderDeployId ? `, deploy: ${renderDeployId}` : ''}).` });
     }
 
+    await prisma.deployment.update({
+      where: { id: deploymentId },
+      data: { renderServiceId: renderServiceId || null, renderDeployId: renderDeployId || null },
+    });
+
     // Poll Render deploy readiness when we have ids and live API
-    if (env.RENDER_API_KEY && renderServiceId && renderDeployId) {
+    const renderIsSimulated = Boolean(renderResult?.simulated || String(renderServiceId || '').startsWith('sim-'));
+    if (!renderIsSimulated && env.RENDER_API_KEY && renderServiceId && renderDeployId) {
       await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', message: 'Polling Render deployment status until live...' });
       const renderStatus = await pollRenderDeployStatus(renderServiceId, renderDeployId, { timeoutMs: 12 * 60 * 1000, intervalMs: 10000 });
       const logs = await fetchRenderDeployLogs(renderServiceId, renderDeployId);
@@ -630,15 +699,15 @@ async function executeOrchestration(deploymentId, projectId, userId) {
         throw new Error(`Render deployment did not reach live state (status: ${renderStatus.status || 'unknown'}).`);
       }
       await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', message: 'Render reports deployment status: live.' });
-    } else if (!priorDeployments.length && renderResult?.simulated) {
+    } else if (renderIsSimulated) {
       await addLog(deploymentId, { stage: 'RENDER', source: 'PROVIDER', logLevel: 'INFO', message: '[Render][SIMULATED] Build and deploy completed (simulated).' });
-    } else if (!env.RENDER_API_KEY) {
+    } else if (!env.RENDER_API_KEY || !renderDeployId) {
       throw new Error('Render API key is required to confirm backend deployment status.');
     }
 
     // Resolve actual backend URL from provider when possible
     let backendUrl = null;
-    if (env.RENDER_API_KEY && renderServiceId) {
+    if (!renderIsSimulated && env.RENDER_API_KEY && renderServiceId) {
       try {
         const svc = await getRenderService(renderServiceId);
         if (svc?.url) backendUrl = svc.url;
@@ -658,7 +727,7 @@ async function executeOrchestration(deploymentId, projectId, userId) {
     emitDeploymentEvent(deploymentId, SOCKET_EVENTS.DEPLOYMENT_STATUS_CHANGED, { deploymentId, status: DEPLOYMENT_STATUS.HEALTH_CHECKING, backendUrl });
     await updateStep(deploymentId, 3, STEP_STATUS.RUNNING);
 
-    const healthPath = freshBackend?.healthCheckPath || '/health';
+    const healthPath = backendService?.healthCheckPath || '/health';
     await addLog(deploymentId, { stage: 'HEALTH_CHECK', source: 'ORCHESTRATOR', message: `Verifying backend health at ${backendUrl}${healthPath}...` });
     const healthResult = await verifyBackendHealth(backendUrl, healthPath, { maxRetries: 24, delayMs: 5000 });
     if (!healthResult.healthy) {
@@ -679,16 +748,19 @@ async function executeOrchestration(deploymentId, projectId, userId) {
     const vercelProject = await ensureVercelProject({
       name: project.name,
       repoUrl: project.githubRepoUrl,
-      rootDir: freshFrontend?.rootDirectory || '/client',
-      buildCommand: freshFrontend?.buildCommand || 'npm run build',
-      outputDirectory: freshFrontend?.outputDirectory || 'dist',
-      framework: mapVercelFramework(freshFrontend?.framework),
+      rootDir: frontendService?.rootDirectory || '/client',
+      buildCommand: frontendService?.buildCommand || 'npm run build',
+      framework: frontendService?.framework || project.detectedPreset || 'REACT_VITE',
+      outputDirectory: frontendService?.outputDirectory || null,
     });
 
     const frontendEnvVars = getProjectEnvVarsForProvider(project.envVariables, 'FRONTEND')
       .filter((e) => e.key !== 'VITE_API_URL');
-    const envVarsToSet = [...frontendEnvVars, { key: 'VITE_API_URL', value: backendUrl }];
+    const envVarsToSet = [...frontendEnvVars, { key: 'VITE_API_URL', value: backendUrl, isSecret: false }];
     const envResult = await upsertVercelEnvVars(vercelProject.projectId || vercelProject.name || project.name, envVarsToSet);
+    if (!envResult.simulated && envResult.count !== envVarsToSet.length) {
+      throw new Error(`Vercel environment propagation incomplete (${envResult.count}/${envVarsToSet.length} variables applied).`);
+    }
     await prisma.deployment.update({ where: { id: deploymentId }, data: { vercelProjectId: vercelProject.projectId || vercelProject.name || null } });
 
     if (envResult.simulated || vercelProject.simulated) {
@@ -709,11 +781,12 @@ async function executeOrchestration(deploymentId, projectId, userId) {
       name: project.name,
       repoUrl: project.githubRepoUrl,
       branch: project.defaultBranch,
-      rootDir: freshFrontend?.rootDirectory || '/client',
-      buildCommand: freshFrontend?.buildCommand || 'npm run build',
-      outputDirectory: freshFrontend?.outputDirectory || 'dist',
-      framework: mapVercelFramework(freshFrontend?.framework),
+      rootDir: frontendService?.rootDirectory || '/client',
+      buildCommand: frontendService?.buildCommand || 'npm run build',
+      framework: frontendService?.framework || project.detectedPreset || 'REACT_VITE',
+      outputDirectory: frontendService?.outputDirectory || null,
       projectId: vercelProject.projectId,
+      repoId: vercelProject.repoId,
     });
 
     await prisma.deployment.update({
@@ -734,7 +807,7 @@ async function executeOrchestration(deploymentId, projectId, userId) {
       await ingestProviderLogs(deploymentId, 'VERCEL', vLogs, 'Vercel');
       if (vercelStatus.timedOut) throw new Error('Vercel deployment timed out before reaching READY state.');
       if (vercelStatus.readyState !== 'READY') {
-        throw new Error(`Vercel deployment failed (state: ${vercelStatus.readyState || 'unknown'}).`);
+        throw new Error(`Vercel deployment failed (state: ${vercelStatus.readyState || 'unknown'}). ${vercelStatus.errorMessage || ''}`);
       }
       finalFrontendUrl = vercelStatus.url || finalFrontendUrl;
       await addLog(deploymentId, { stage: 'VERCEL', source: 'ORCHESTRATOR', message: 'Vercel reports deployment state: READY.' });
@@ -745,7 +818,55 @@ async function executeOrchestration(deploymentId, projectId, userId) {
     await addLog(deploymentId, { stage: 'VERCEL', source: 'ORCHESTRATOR', message: `Frontend deployment URL: ${finalFrontendUrl}` });
     await updateStep(deploymentId, 5, STEP_STATUS.SUCCESS, vercelResult.deploymentId);
 
-    // Success (only after provider-confirmed/simulated-explicit success path above)
+    // Step 6: verify the frontend before updating backend CORS and finalizing.
+    currentStepOrder = 6;
+    await updateStep(deploymentId, 6, STEP_STATUS.RUNNING);
+    if (vercelResult.simulated || vercelProject.simulated) {
+      await addLog(deploymentId, { stage: 'HEALTH_CHECK', source: 'ORCHESTRATOR', logLevel: 'WARN', message: 'SIMULATED (dev mode): Frontend health verification was not sent to the simulated URL.' });
+      await updateStep(deploymentId, 6, STEP_STATUS.SKIPPED);
+    } else {
+      const frontendHealth = await verifyHttpHealth(finalFrontendUrl, { maxRetries: 5, delayMs: 2000, timeoutMs: 10000 });
+      if (!frontendHealth.healthy) {
+        throw new Error(`Frontend health check failed: ${frontendHealth.error || 'No successful HTTP response.'}`);
+      }
+      await addLog(deploymentId, { stage: 'HEALTH_CHECK', source: 'ORCHESTRATOR', message: `Frontend healthy (HTTP ${frontendHealth.statusCode}).` });
+      await updateStep(deploymentId, 6, STEP_STATUS.SUCCESS);
+    }
+
+    // Step 7: make the frontend origin available to the backend, redeploy Render,
+    // then re-check backend readiness before reporting the full stack as successful.
+    currentStepOrder = 7;
+    await updateStep(deploymentId, 7, STEP_STATUS.RUNNING);
+    if (renderIsSimulated || vercelResult.simulated || vercelProject.simulated) {
+      await addLog(deploymentId, { stage: 'CORS', source: 'ORCHESTRATOR', logLevel: 'WARN', message: 'SIMULATED (dev mode): Render CORS environment update and restart were skipped.' });
+      await updateStep(deploymentId, 7, STEP_STATUS.SKIPPED);
+    } else {
+      await prisma.deployment.update({ where: { id: deploymentId }, data: { status: DEPLOYMENT_STATUS.DEPLOYING_BACKEND } });
+      emitDeploymentEvent(deploymentId, SOCKET_EVENTS.DEPLOYMENT_STATUS_CHANGED, { deploymentId, status: DEPLOYMENT_STATUS.DEPLOYING_BACKEND, backendUrl });
+      const frontendOrigin = new URL(finalFrontendUrl).origin;
+      const existingCors = backendEnvVars.find((item) => item.key === 'CORS_ORIGINS')?.value || '';
+      const allowedOrigins = [...new Set([...existingCors.split(',').map((origin) => origin.trim()).filter(Boolean), frontendOrigin])];
+      await upsertRenderServiceEnvVar(renderServiceId, 'CORS_ORIGINS', allowedOrigins.join(','));
+      const corsDeploy = await triggerRenderDeploy(renderServiceId);
+      renderDeployId = corsDeploy.deployId;
+      await prisma.deployment.update({ where: { id: deploymentId }, data: { renderDeployId } });
+      await updateStep(deploymentId, 7, STEP_STATUS.RUNNING, renderDeployId);
+      await addLog(deploymentId, { stage: 'CORS', source: 'ORCHESTRATOR', message: `Added ${frontendOrigin} to Render CORS_ORIGINS and restarted the backend.` });
+      const corsStatus = await pollRenderDeployStatus(renderServiceId, renderDeployId, { timeoutMs: 12 * 60 * 1000, intervalMs: 10000 });
+      const corsLogs = await fetchRenderDeployLogs(renderServiceId, renderDeployId);
+      await ingestProviderLogs(deploymentId, 'RENDER', corsLogs, 'Render');
+      if (corsStatus.timedOut || corsStatus.status !== 'live') {
+        throw new Error(`Render CORS update deployment did not reach live state (status: ${corsStatus.status || 'unknown'}).`);
+      }
+      const finalBackendHealth = await verifyBackendHealth(backendUrl, healthPath, { maxRetries: 12, delayMs: 5000 });
+      if (!finalBackendHealth.healthy) {
+        throw new Error(`Backend health check failed after CORS update: ${finalBackendHealth.error || 'No successful HTTP response.'}`);
+      }
+      await addLog(deploymentId, { stage: 'HEALTH_CHECK', source: 'ORCHESTRATOR', message: `Backend healthy after CORS update (HTTP ${finalBackendHealth.statusCode}).` });
+      await updateStep(deploymentId, 7, STEP_STATUS.SUCCESS, renderDeployId);
+    }
+
+    // Success only after provider readiness and both health checks (or explicit simulation).
     const completedAt = new Date();
     const durationSeconds = Math.round((Date.now() - startTime) / 1000);
     const finalized = await prisma.deployment.update({
@@ -780,10 +901,16 @@ async function executeOrchestration(deploymentId, projectId, userId) {
     emitDeploymentEvent(deploymentId, SOCKET_EVENTS.DEPLOYMENT_COMPLETED, finalized);
 
   } catch (error) {
-    const safeMessage = safeErrorMessage(error);
+    const providerDetail = sanitizeLogMessage(error?.response?.data?.error?.message || error?.response?.data?.message || error?.message || 'Deployment pipeline failed.', 1000);
+    const safeMessage = env.isProduction ? SAFE_ERROR_PROD : providerDetail;
     try {
       await failRemainingSteps(deploymentId, currentStepOrder);
-      await addLog(deploymentId, { stage: 'ORCHESTRATOR', source: 'ORCHESTRATOR', logLevel: 'ERROR', message: `Pipeline halted: ${safeMessage}` });
+      await addLog(deploymentId, {
+        stage: 'ORCHESTRATOR',
+        source: 'ORCHESTRATOR',
+        logLevel: 'ERROR',
+        message: env.isProduction ? `Pipeline halted: ${safeMessage} Provider detail: ${providerDetail}` : `Pipeline halted: ${safeMessage}`,
+      });
       await prisma.deployment.update({
         where: { id: deploymentId },
         data: { status: DEPLOYMENT_STATUS.FAILED, errorMessage: safeMessage, completedAt: new Date() },
@@ -807,9 +934,18 @@ async function executeOrchestration(deploymentId, projectId, userId) {
   }
 }
 
+// Placeholder for stream and URLs endpoints (implemented in next commit)
+export async function getDeploymentUrls(req, res, next) {
+  return res.status(501).json({ success: false, message: 'Not implemented' });
+}
+
+export async function streamDeploymentLogs(req, res, next) {
+  return res.status(501).json({ success: false, message: 'Not implemented' });
+}
+
 export async function getProjectDeployments(req, res, next) {
   try {
-    const { projectId } = req.params;
+    const projectId = req.params.projectId || req.query.projectId;
     if (!isUuid(projectId)) {
       return res.status(400).json({ success: false, message: 'Invalid project identifier.' });
     }
