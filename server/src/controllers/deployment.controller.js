@@ -1179,3 +1179,56 @@ export async function cancelDeployment(req, res, next) {
   }
 }
 
+/**
+ * GET /api/deploy/stats
+ * Aggregate telemetry and success/failure statistics for the authenticated user.
+ */
+export async function getDeploymentStats(req, res, next) {
+  try {
+    const projectId = req.query.projectId;
+    const whereClause = {
+      project: { userId: req.user.userId },
+      ...(isUuid(projectId) ? { projectId } : {}),
+    };
+
+    const deployments = await prisma.deployment.findMany({
+      where: whereClause,
+      select: {
+        status: true,
+        durationSeconds: true,
+        startedAt: true,
+        completedAt: true,
+      },
+    });
+
+    const total = deployments.length;
+    const successCount = deployments.filter((d) => d.status === DEPLOYMENT_STATUS.SUCCESS).length;
+    const failureCount = deployments.filter((d) => d.status === DEPLOYMENT_STATUS.FAILED).length;
+    const cancelledCount = deployments.filter((d) => d.status === DEPLOYMENT_STATUS.CANCELLED).length;
+    const activeCount = total - successCount - failureCount - cancelledCount;
+
+    const completedWithDuration = deployments.filter((d) => typeof d.durationSeconds === 'number' && d.durationSeconds > 0);
+    const avgDurationSeconds = completedWithDuration.length > 0
+      ? Math.round(completedWithDuration.reduce((acc, d) => acc + d.durationSeconds, 0) / completedWithDuration.length)
+      : 0;
+
+    const successRate = total > 0 ? Math.round((successCount / total) * 100) : 0;
+
+    res.json({
+      success: true,
+      data: {
+        totalDeployments: total,
+        successCount,
+        failureCount,
+        cancelledCount,
+        activeCount,
+        successRatePercentage: successRate,
+        averageDurationSeconds: avgDurationSeconds,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+

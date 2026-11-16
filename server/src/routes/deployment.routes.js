@@ -4,6 +4,7 @@ import {
   getDeployment,
   getDeploymentHealth,
   getDeploymentLogs,
+  getDeploymentStats,
   getDeploymentUrls,
   getProjectDeployments,
   retryDeployment,
@@ -28,6 +29,9 @@ router.post('/', deployLimiter, triggerDeployment);
 
 // GET /api/deploy — List deployments for a project (pass ?projectId=)
 router.get('/', getProjectDeployments);
+
+// GET /api/deploy/stats — Aggregate telemetry and deployment statistics
+router.get('/stats', getDeploymentStats);
 
 // GET /api/deploy/:id — Get full deployment record (status, steps, logs)
 router.get('/:id', getDeployment);
