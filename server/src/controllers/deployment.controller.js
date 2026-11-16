@@ -934,13 +934,173 @@ async function executeOrchestration(deploymentId, projectId, userId) {
   }
 }
 
-// Placeholder for stream and URLs endpoints (implemented in next commit)
+/**
+ * GET /api/deploy/:id/urls
+ * Returns the frontend and backend public URLs for a completed deployment.
+ */
 export async function getDeploymentUrls(req, res, next) {
-  return res.status(501).json({ success: false, message: 'Not implemented' });
+  try {
+    const { id } = req.params;
+    if (!isUuid(id)) return res.status(400).json({ success: false, message: 'Invalid deployment identifier.' });
+
+    const deployment = await prisma.deployment.findFirst({
+      where: { id, project: { userId: req.user.userId } },
+      select: {
+        id: true,
+        status: true,
+        backendUrl: true,
+        frontendUrl: true,
+        completedAt: true,
+      },
+    });
+    if (!deployment) return res.status(404).json({ success: false, message: 'Deployment not found.' });
+
+    res.json({
+      success: true,
+      data: {
+        deploymentId: id,
+        status: deployment.status,
+        backendUrl: deployment.backendUrl || null,
+        frontendUrl: deployment.frontendUrl || null,
+        completedAt: deployment.completedAt || null,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
 }
 
+/**
+ * GET /api/deploy/:id/stream
+ * Server-Sent Events (SSE) endpoint: streams live deployment logs.
+ * Clients that cannot use Socket.IO (e.g. EventSource in browsers, curl) use this endpoint.
+ *
+ * Protocol:
+ *   event: log       — a single log line
+ *   event: status    — deployment status change
+ *   event: done      — deployment finished (success or failure); client should close
+ *   event: heartbeat — keep-alive every 15 s
+ *
+ * Query params:
+ *   after (optional) — BigInt log id; streams only logs newer than this cursor
+ */
 export async function streamDeploymentLogs(req, res, next) {
-  return res.status(501).json({ success: false, message: 'Not implemented' });
+  try {
+    const { id } = req.params;
+    if (!isUuid(id)) return res.status(400).json({ success: false, message: 'Invalid deployment identifier.' });
+
+    const deployment = await prisma.deployment.findFirst({
+      where: { id, project: { userId: req.user.userId } },
+      select: { id: true, status: true, backendUrl: true, frontendUrl: true },
+    });
+    if (!deployment) return res.status(404).json({ success: false, message: 'Deployment not found.' });
+
+    // Determine initial cursor (send all existing logs if no `after`)
+    const rawAfter = req.query.after == null ? null : String(req.query.after);
+    if (rawAfter != null && !/^\d+$/.test(rawAfter)) {
+      return res.status(400).json({ success: false, message: 'Invalid log cursor.' });
+    }
+
+    // SSE headers — disable all buffering so chunks are flushed immediately
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');  // Disable nginx/proxy buffering
+    res.flushHeaders();
+
+    const TERMINAL_STATUSES = ['SUCCESS', 'FAILED', 'CANCELLED'];
+    let lastLogId = rawAfter ? BigInt(rawAfter) : BigInt(0);
+    let closed = false;
+
+    function send(event, data) {
+      if (closed) return;
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    }
+
+    async function poll() {
+      if (closed) return;
+
+      try {
+        // Fetch latest logs after cursor
+        const logs = await prisma.deploymentLog.findMany({
+          where: { deploymentId: id, id: { gt: lastLogId } },
+          orderBy: { id: 'asc' },
+          take: 100,
+        });
+
+        for (const log of logs) {
+          send('log', {
+            id: log.id.toString(),
+            stage: log.stage,
+            message: log.message,
+            logLevel: log.logLevel,
+            source: log.source,
+            createdAt: log.createdAt,
+          });
+          lastLogId = log.id;
+        }
+
+        // Check deployment status
+        const current = await prisma.deployment.findUnique({
+          where: { id },
+          select: { status: true, backendUrl: true, frontendUrl: true, errorMessage: true },
+        });
+
+        if (current) {
+          send('status', {
+            deploymentId: id,
+            status: current.status,
+            backendUrl: current.backendUrl || null,
+            frontendUrl: current.frontendUrl || null,
+          });
+
+          if (TERMINAL_STATUSES.includes(current.status)) {
+            send('done', {
+              deploymentId: id,
+              status: current.status,
+              backendUrl: current.backendUrl || null,
+              frontendUrl: current.frontendUrl || null,
+              error: current.errorMessage || null,
+            });
+            cleanup();
+            return;
+          }
+        }
+
+        // Schedule next poll (3-second interval keeps latency low without hammering the DB)
+        if (!closed) {
+          setTimeout(poll, 3000);
+        }
+      } catch (err) {
+        if (!closed) {
+          send('error', { message: 'Log stream error. Please switch to polling.' });
+          cleanup();
+        }
+      }
+    }
+
+    // Send heartbeat every 15 s to prevent proxy timeouts
+    const heartbeatTimer = setInterval(() => {
+      if (closed) return;
+      res.write(`event: heartbeat\ndata: ${JSON.stringify({ ts: new Date().toISOString() })}\n\n`);
+    }, 15000);
+
+    function cleanup() {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeatTimer);
+      try { res.end(); } catch { /* ignore */ }
+    }
+
+    // Handle client disconnect
+    req.on('close', cleanup);
+    req.on('aborted', cleanup);
+
+    // Start polling immediately
+    poll();
+  } catch (error) {
+    next(error);
+  }
 }
 
 export async function getProjectDeployments(req, res, next) {
