@@ -48,8 +48,10 @@ CREATE TABLE IF NOT EXISTS project_services (
     service_type VARCHAR(20) NOT NULL CHECK (service_type IN ('BACKEND', 'FRONTEND', 'DATABASE')),
     provider VARCHAR(30) NOT NULL CHECK (provider IN ('RENDER', 'VERCEL', 'GITHUB')),
     root_directory VARCHAR(255) DEFAULT '/',
+    framework VARCHAR(50),
     build_command VARCHAR(255),
     start_command VARCHAR(255),
+    output_directory VARCHAR(255),
     health_check_path VARCHAR(255) DEFAULT '/health',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(project_id, service_type)

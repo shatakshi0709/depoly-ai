@@ -1,0 +1,3 @@
+ALTER TABLE project_services
+  ADD COLUMN IF NOT EXISTS framework VARCHAR(50),
+  ADD COLUMN IF NOT EXISTS output_directory VARCHAR(255);

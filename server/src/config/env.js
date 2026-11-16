@@ -73,31 +73,11 @@ export const env = {
   GITHUB_CLIENT_SECRET: process.env.GITHUB_CLIENT_SECRET || '',
   GITHUB_CALLBACK_URL: process.env.GITHUB_CALLBACK_URL || 'http://localhost:5173/auth/callback',
   RENDER_API_KEY: process.env.RENDER_API_KEY || '',
+  RENDER_OWNER_ID: process.env.RENDER_OWNER_ID || '',
   VERCEL_API_KEY: process.env.VERCEL_API_KEY || '',
   VERCEL_TEAM_ID: process.env.VERCEL_TEAM_ID || '',
   // Simulation is allowed only when explicitly enabled in non-production mode.
   ALLOW_SIMULATED_DEPLOYMENTS:
     !isProduction && String(process.env.ALLOW_SIMULATED_DEPLOYMENTS || '').toLowerCase() === 'true',
 };
-
-/**
- * Origins presented by the packaged desktop client. Electron loads the renderer
- * from a file:// URL, so the Socket.IO WebSocket handshake carries `Origin: file://`
- * (plain HTTP API calls omit the Origin header entirely). These are trusted because
- * every API request and socket connection is still authenticated with a JWT bearer
- * token; allowing the origin grants no unauthenticated access.
- */
-const DESKTOP_APP_ORIGINS = ['file://'];
-
-/**
- * Single source of truth for CORS origin checks (used by both the HTTP middleware
- * and the Socket.IO gateway) so the two can never drift apart.
- * Allows non-browser clients (no Origin header), the packaged desktop app, and any
- * explicitly configured origin.
- */
-export function isAllowedOrigin(origin, allowedOrigins = env.CORS_ORIGINS) {
-  if (!origin) return true; // non-browser clients (no Origin header)
-  if (DESKTOP_APP_ORIGINS.includes(origin)) return true; // packaged desktop app
-  return Array.isArray(allowedOrigins) && allowedOrigins.includes(origin);
-}
 

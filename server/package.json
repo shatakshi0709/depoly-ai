@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
+    "test:deployment": "node test-deployment-engine.js",
     "db:generate": "prisma generate --schema=../database/schema.prisma",
     "db:push": "prisma db push --schema=../database/schema.prisma",
     "db:migrate": "prisma migrate dev --schema=../database/schema.prisma",
