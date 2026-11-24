@@ -3,7 +3,7 @@ import { emitDeploymentEvent, emitDeploymentLog, emitUserNotification } from '..
 import { DEPLOYMENT_STATUS, STEP_STATUS, SOCKET_EVENTS } from '@deplo/shared';
 import { env } from '../config/env.js';
 import { decrypt } from '../utils/crypto.js';
-import { isUuid } from '../utils/validate.js';
+import { isUuid, isNonEmptyString } from '../utils/validate.js';
 import { sanitizeLogMessage, sanitizeText } from '../utils/sanitize.js';
 import {
   createRenderWebService,
@@ -12,6 +12,7 @@ import {
   getRenderService,
   fetchRenderDeployLogs,
   verifyBackendHealth,
+  sanitizeRenderError,
 } from '../services/render.service.js';
 import {
   ensureVercelProject,
@@ -27,6 +28,35 @@ function safeErrorMessage(err) {
   if (env.isProduction) return SAFE_ERROR_PROD;
   const msg = err?.message || 'Deployment pipeline failed.';
   return sanitizeText(msg, 500);
+}
+
+/**
+ * Validate analyzer-provided backend service config against basic sanity rules.
+ * Does not hardcode repo-specific settings; only ensures required fields are present
+ * and well-formed before provider provisioning.
+ */
+export function validateBackendServiceConfig(backendService, repoUrl) {
+  const issues = [];
+  if (!backendService) {
+    issues.push('No backend service configuration found from analyzer.');
+    return issues;
+  }
+  if (!isNonEmptyString(backendService.rootDirectory) || backendService.rootDirectory.trim().length === 0) {
+    issues.push('Backend rootDirectory is missing or empty.');
+  }
+  if (!isNonEmptyString(backendService.buildCommand) || backendService.buildCommand.trim().length === 0) {
+    issues.push('Backend buildCommand is missing or empty.');
+  }
+  if (!isNonEmptyString(backendService.startCommand) || backendService.startCommand.trim().length === 0) {
+    issues.push('Backend startCommand is missing or empty.');
+  }
+  if (!isNonEmptyString(repoUrl) || !/^https?:\/\/github\.com\//i.test(repoUrl)) {
+    issues.push('Repository URL is missing or not a valid GitHub URL.');
+  }
+  if (!isNonEmptyString(backendService.healthCheckPath) || !String(backendService.healthCheckPath).startsWith('/')) {
+    issues.push('Backend healthCheckPath is missing or does not start with "/".');
+  }
+  return issues;
 }
 
 async function createNotification({ userId, deploymentId, projectId, type, title, message }) {
@@ -333,70 +363,109 @@ async function executeOrchestration(deploymentId, projectId, userId) {
     const backendEnvVars = getProjectEnvVarsForProvider(project.envVariables, 'BACKEND');
     await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', message: `Provisioning backend service on Render for "${project.name}"...` });
 
-    const renderResult = await createRenderWebService({
-      name: project.name,
-      repoUrl: project.githubRepoUrl,
-      branch: project.defaultBranch,
-      rootDir: backendService?.rootDirectory || '/server',
-      buildCommand: backendService?.buildCommand || 'npm install',
-      startCommand: backendService?.startCommand || 'npm start',
-      envVars: backendEnvVars,
-    });
-
-    await prisma.deployment.update({
-      where: { id: deploymentId },
-      data: { renderServiceId: renderResult.serviceId || null, renderDeployId: renderResult.deployId || null },
-    });
-
-    if (renderResult.simulated) {
-      await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', logLevel: 'WARN', message: 'SIMULATED (dev mode): Render service/deploy created via explicit simulation, not a real provider deployment.' });
+    // Validate analyzer output against basic sanity rules before provider provisioning.
+    const configIssues = validateBackendServiceConfig(backendService, project.githubRepoUrl);
+    if (configIssues.length > 0) {
+      throw new Error(`Invalid backend service configuration: ${configIssues.join('; ')}`);
     }
 
-    let renderDeployId = renderResult.deployId;
-    if (!renderDeployId && renderResult.serviceId && env.RENDER_API_KEY) {
-      // Some API responses may not include deploy id; attempt to trigger or discover via status in later step.
-      try {
-        const t = await triggerRenderDeploy(renderResult.serviceId);
-        renderDeployId = t.deployId;
-        await prisma.deployment.update({ where: { id: deploymentId }, data: { renderDeployId } });
-      } catch {
-        // continue; polling by service latest deploy may be needed in future enhancement
+    // Retry dedup: reuse an existing Render service from a previous deployment of this project
+    // instead of creating a duplicate. Only provision a new service when none exists.
+    let renderServiceId = null;
+    let renderDeployId = null;
+    const priorDeployments = await prisma.deployment.findMany({
+      where: { projectId, renderServiceId: { not: null } },
+      orderBy: { startedAt: 'desc' },
+      take: 5,
+      select: { id: true, renderServiceId: true, renderDeployId: true, status: true, attemptNumber: true },
+    });
+
+    if (priorDeployments.length > 0) {
+      const prior = priorDeployments[0];
+      renderServiceId = prior.renderServiceId;
+      renderDeployId = prior.renderDeployId || null;
+      await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', message: `Reusing existing Render service ${renderServiceId} from prior deployment ${prior.id} (attempt #${prior.attemptNumber}).` });
+
+      // Trigger a new deploy on the existing service when we have a live API key.
+      if (env.RENDER_API_KEY && renderServiceId) {
+        try {
+          const t = await triggerRenderDeploy(renderServiceId);
+          renderDeployId = t.deployId;
+          await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', message: `Triggered new deploy ${renderDeployId} on existing Render service ${renderServiceId}.` });
+        } catch (deployErr) {
+          const renderErr = sanitizeRenderError(deployErr);
+          await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', logLevel: 'ERROR', message: `Failed to trigger deploy on existing Render service: ${renderErr.message}` });
+          throw deployErr;
+        }
       }
-    }
+    } else {
+      const renderResult = await createRenderWebService({
+        name: project.name,
+        repoUrl: project.githubRepoUrl,
+        branch: project.defaultBranch,
+        rootDir: backendService?.rootDirectory || '/server',
+        buildCommand: backendService?.buildCommand || 'npm install',
+        startCommand: backendService?.startCommand || 'npm start',
+        envVars: backendEnvVars,
+      });
 
-    await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', message: `Render service reported (service: ${renderResult.serviceId || 'n/a'}${renderDeployId ? `, deploy: ${renderDeployId}` : ''}).` });
+      renderServiceId = renderResult.serviceId || null;
+      renderDeployId = renderResult.deployId || null;
+
+      await prisma.deployment.update({
+        where: { id: deploymentId },
+        data: { renderServiceId: renderServiceId || null, renderDeployId: renderDeployId || null },
+      });
+
+      if (renderResult.simulated) {
+        await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', logLevel: 'WARN', message: 'SIMULATED (dev mode): Render service/deploy created via explicit simulation, not a real provider deployment.' });
+      }
+
+      if (!renderDeployId && renderServiceId && env.RENDER_API_KEY) {
+        try {
+          const t = await triggerRenderDeploy(renderServiceId);
+          renderDeployId = t.deployId;
+          await prisma.deployment.update({ where: { id: deploymentId }, data: { renderDeployId } });
+        } catch {
+          // continue; polling by service latest deploy may be needed in future enhancement
+        }
+      }
+
+      await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', message: `Render service reported (service: ${renderServiceId || 'n/a'}${renderDeployId ? `, deploy: ${renderDeployId}` : ''}).` });
+    }
 
     // Poll Render deploy readiness when we have ids and live API
-    if (env.RENDER_API_KEY && renderResult.serviceId && renderDeployId) {
+    if (env.RENDER_API_KEY && renderServiceId && renderDeployId) {
       await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', message: 'Polling Render deployment status until live...' });
-      const renderStatus = await pollRenderDeployStatus(renderResult.serviceId, renderDeployId, { timeoutMs: 12 * 60 * 1000, intervalMs: 10000 });
-      const logs = await fetchRenderDeployLogs(renderResult.serviceId, renderDeployId);
+      const renderStatus = await pollRenderDeployStatus(renderServiceId, renderDeployId, { timeoutMs: 12 * 60 * 1000, intervalMs: 10000 });
+      const logs = await fetchRenderDeployLogs(renderServiceId, renderDeployId);
       await ingestProviderLogs(deploymentId, 'RENDER', logs, 'Render');
       if (renderStatus.timedOut) throw new Error('Render deployment timed out before reaching a live state.');
       if (renderStatus.status !== 'live') {
         throw new Error(`Render deployment did not reach live state (status: ${renderStatus.status || 'unknown'}).`);
       }
       await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', message: 'Render reports deployment status: live.' });
-    } else if (renderResult.simulated) {
+    } else if (!priorDeployments.length && renderResult?.simulated) {
       await addLog(deploymentId, { stage: 'RENDER', source: 'PROVIDER', logLevel: 'INFO', message: '[Render][SIMULATED] Build and deploy completed (simulated).' });
     } else if (!env.RENDER_API_KEY) {
       throw new Error('Render API key is required to confirm backend deployment status.');
     }
 
     // Resolve actual backend URL from provider when possible
-    let backendUrl = renderResult.url || null;
-    if (env.RENDER_API_KEY && renderResult.serviceId) {
+    let backendUrl = null;
+    if (env.RENDER_API_KEY && renderServiceId) {
       try {
-        const svc = await getRenderService(renderResult.serviceId);
+        const svc = await getRenderService(renderServiceId);
         if (svc?.url) backendUrl = svc.url;
       } catch {
         // keep reported URL
       }
     }
+    if (!backendUrl && renderResult?.url) backendUrl = renderResult.url;
     if (!backendUrl) throw new Error('Backend service URL could not be determined from provider response.');
 
     await addLog(deploymentId, { stage: 'RENDER', source: 'ORCHESTRATOR', message: `Backend service URL: ${backendUrl}` });
-    await updateStep(deploymentId, 2, STEP_STATUS.SUCCESS, renderDeployId || renderResult.serviceId);
+    await updateStep(deploymentId, 2, STEP_STATUS.SUCCESS, renderDeployId || renderServiceId);
 
     // Step 3: Health verification (real HTTP check; simulated only if explicitly enabled & no key)
     currentStepOrder = 3;

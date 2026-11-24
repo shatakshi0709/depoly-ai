@@ -230,7 +230,44 @@ export async function githubOAuthStart(req, res, next) {
 }
 
 /**
+ * Start GitHub OAuth connect flow for an already authenticated user.
+ * Returns signed state (with userId embedded in meta, HMAC-protected) and authorize URL.
+ */
+export async function githubOAuthConnectStart(req, res, next) {
+  try {
+    if (!env.GITHUB_CLIENT_ID) {
+      return res.status(503).json({ success: false, message: 'GitHub OAuth is not configured on the server.' });
+    }
+    const userId = req.user?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required to connect GitHub.' });
+    }
+    // State payload includes userId so the callback can link to the correct account.
+    // Signature prevents tampering; expiry prevents replay.
+    const state = createOAuthState({ t: 'github_oauth_connect', userId });
+    const redirectUri = env.GITHUB_CALLBACK_URL;
+    const params = new URLSearchParams({
+      client_id: env.GITHUB_CLIENT_ID,
+      redirect_uri: redirectUri,
+      scope: 'repo,read:user,user:email',
+      state,
+    });
+    res.json({
+      success: true,
+      data: {
+        state,
+        redirectUri,
+        authorizeUrl: `https://github.com/login/oauth/authorize?${params.toString()}`,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
  * Handle GitHub OAuth callback: exchanges temporary code for user token and links account.
+ * Supports both sign-in flow (no JWT) and connect flow (valid JWT or signed state with userId).
  */
 export async function githubOAuthCallback(req, res, next) {
   try {
@@ -261,6 +298,12 @@ export async function githubOAuthCallback(req, res, next) {
       });
     }
 
+    // Determine if this is a connect flow (link GitHub to an existing authenticated user).
+    // The signed state meta carries { t: 'github_oauth_connect', userId } when initiated via /auth/github/connect/start.
+    // JWT-based auth (req.user) takes precedence if present; otherwise fall back to state-embedded userId.
+    const isConnectFlow = stateCheck?.payload?.m?.t === 'github_oauth_connect';
+    const connectUserId = (req.user?.userId && isConnectFlow) ? req.user.userId : (isConnectFlow ? stateCheck.payload.m.userId : null);
+
     if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) {
       return res.status(503).json({
         success: false,
@@ -269,6 +312,8 @@ export async function githubOAuthCallback(req, res, next) {
     }
 
     // 1. Exchange authorization code for GitHub access token
+    // redirect_uri must exactly match the value used in the authorization request.
+    // Both flows use env.GITHUB_CALLBACK_URL, guaranteeing consistency.
     const tokenResponse = await axios.post(
       'https://github.com/login/oauth/access_token',
       {
@@ -283,12 +328,20 @@ export async function githubOAuthCallback(req, res, next) {
       }
     );
 
-    const { access_token: githubAccessToken, error } = tokenResponse.data || {};
+    const { access_token: githubAccessToken, error: ghError, error_description: ghErrorDesc } = tokenResponse.data || {};
 
-    if (error || !githubAccessToken) {
+    if (ghError || !githubAccessToken) {
+      // Surface a sanitized, actionable error without exposing secrets or codes.
+      const detail = env.isProduction
+        ? ''
+        : ` (GitHub: ${sanitizeText(ghErrorDesc || ghError || 'unknown_error', 200)})`;
+      const userMessage =
+        ghError === 'bad_verification_code'
+          ? `Failed to exchange GitHub authorization code. The authorization code is invalid or was already used. Please try connecting again.${detail}`
+          : `Failed to exchange GitHub authorization code.${detail}`;
       return res.status(400).json({
         success: false,
-        message: 'Failed to exchange GitHub authorization code.',
+        message: userMessage,
       });
     }
 
@@ -314,9 +367,9 @@ export async function githubOAuthCallback(req, res, next) {
     // Encrypt GitHub access token before saving to database
     const encryptedToken = encrypt(githubAccessToken);
 
-    // 3. Upsert user and link OAuth account in a single transaction
+    // 3. Link GitHub account to the correct user
     const user = await prisma.$transaction(async (tx) => {
-      // Check if OAuth account exists
+      // Check if this GitHub account is already linked to another user
       const existingOAuth = await tx.oAuthAccount.findUnique({
         where: {
           provider_providerUserId: {
@@ -328,21 +381,53 @@ export async function githubOAuthCallback(req, res, next) {
       });
 
       if (existingOAuth) {
-        // Update token and avatar
+        // GitHub account already linked to a user.
+        if (isConnectFlow && connectUserId && existingOAuth.userId !== connectUserId) {
+          // Re-link: unlink from previous user, link to current authenticated user.
+          await tx.oAuthAccount.update({
+            where: { id: existingOAuth.id },
+            data: { userId: connectUserId, accessTokenEnc: encryptedToken },
+          });
+          await tx.user.update({
+            where: { id: connectUserId },
+            data: { avatarUrl },
+          });
+          return await tx.user.findUnique({
+            where: { id: connectUserId },
+          });
+        }
+        // Same user or non-connect flow: refresh token and avatar.
         await tx.oAuthAccount.update({
           where: { id: existingOAuth.id },
           data: { accessTokenEnc: encryptedToken },
         });
-
         await tx.user.update({
           where: { id: existingOAuth.userId },
           data: { avatarUrl },
         });
-
         return existingOAuth.user;
       }
 
-      // If user exists with the same email, link account
+      if (isConnectFlow && connectUserId) {
+        // Connect flow: link GitHub to the already authenticated user (ownership enforced by signed state/JWT).
+        const existingUser = await tx.user.findUnique({
+          where: { id: connectUserId },
+        });
+        if (!existingUser) {
+          throw new Error('Authenticated user not found.');
+        }
+        await tx.oAuthAccount.create({
+          data: {
+            userId: connectUserId,
+            provider: 'github',
+            providerUserId,
+            accessTokenEnc: encryptedToken,
+          },
+        });
+        return existingUser;
+      }
+
+      // Sign-in flow: find or create user by GitHub email
       let existingUser = await tx.user.findUnique({
         where: { email: email.toLowerCase() },
       });
@@ -368,6 +453,15 @@ export async function githubOAuthCallback(req, res, next) {
 
       return existingUser;
     });
+
+    // Connect flow: no new token issued; existing session stays valid.
+    if (isConnectFlow) {
+      return res.json({
+        success: true,
+        flow: 'connect',
+        message: 'GitHub account connected successfully.',
+      });
+    }
 
     const token = generateToken(user);
 

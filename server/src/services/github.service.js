@@ -34,7 +34,7 @@ export function parseGitHubUrl(urlOrName) {
 /**
  * Fetch repositories accessible to the authenticated user.
  */
-export async function getUserRepositories(token) {
+async function _getUserRepositories(token) {
   const octokit = getOctokit(token);
   const response = await octokit.repos.listForAuthenticatedUser({
     sort: 'updated',
@@ -53,6 +53,15 @@ export async function getUserRepositories(token) {
     language: repo.language,
     updatedAt: repo.updated_at,
   }));
+}
+
+// Test seam (behavior unchanged): allows controlled stubbing in tests without real GitHub API calls.
+export const githubServiceApi = {
+  getUserRepositories: _getUserRepositories,
+};
+
+export async function getUserRepositories(token) {
+  return githubServiceApi.getUserRepositories(token);
 }
 
 /**

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
@@ -11,8 +11,15 @@ export function AuthCallback() {
   const [message, setMessage] = useState('Exchanging authorization code with GitHub...');
   const { refreshProfile } = useAuth();
   const navigate = useNavigate();
+  const exchangeAttempted = useRef(false);
 
   useEffect(() => {
+    // Single-execution guard: authorization codes are single-use.
+    // Prevents duplicate POST /auth/github from React StrictMode double-invocation,
+    // re-mount via browser back button, or race conditions between rapid calls.
+    if (exchangeAttempted.current) return;
+    exchangeAttempted.current = true;
+
     const code = searchParams.get('code');
     const state = searchParams.get('state');
     const errorParam = searchParams.get('error');
@@ -36,13 +43,24 @@ export function AuthCallback() {
       return;
     }
 
+    // Detect connect flow from the trusted server response (signed state already verified server-side).
+    // Do NOT rely on sessionStorage: Electron completes OAuth in the system browser, which has
+    // a different storage context and cannot read flags set inside Electron's renderer.
+    let isConnectFlow = false;
+
+    // Clean up temporary sessionStorage flags used for same-context validation hints.
+    try {
+      sessionStorage.removeItem('deplo_oauth_state');
+    } catch {
+      // Ignore storage errors.
+    }
+
     // Optional same-context hint: if we started in this browser context, ensure state matches.
     // Do NOT block on absence/mismatch: in Electron the system browser may complete the callback in a
     // different storage context. Authoritative CSRF protection is the server's signed+expiring state verification.
     let expectedState = null;
     try {
       expectedState = sessionStorage.getItem('deplo_oauth_state');
-      sessionStorage.removeItem('deplo_oauth_state');
     } catch {
       expectedState = null;
     }
@@ -55,12 +73,32 @@ export function AuthCallback() {
     async function exchangeCode() {
       try {
         const res = await api.post('/auth/github', { code, state });
+
+        // Determine flow from trusted server response (not sessionStorage).
+        isConnectFlow = res.data?.flow === 'connect';
+
+        if (isConnectFlow) {
+          // Connect flow: GitHub account linked to the existing authenticated user.
+          // Do NOT replace the existing session token. Refresh profile to include GitHub info.
+          try {
+            await refreshProfile();
+          } catch {
+            // Profile refresh is best-effort; connection is already recorded server-side.
+          }
+          setStatus('success');
+          setMessage('GitHub account connected successfully! Redirecting to your projects...');
+          setTimeout(() => {
+            navigate('/new', { replace: true });
+          }, 1200);
+          return;
+        }
+
         const { token, user } = res.data?.data || {};
         if (!token || !user) {
           throw new Error('Invalid authentication response.');
         }
 
-        // Store auth token
+        // Store auth token (sign-in flow only)
         localStorage.setItem('deplo_token', token);
         localStorage.setItem('deplo_user', JSON.stringify(user));
 

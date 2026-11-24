@@ -5,8 +5,8 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Load environment variables from server/.env first, then repo-root .env without overriding.
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+// Load environment variables from server/.env first (overrides shell empties), then repo-root .env without overriding.
+dotenv.config({ path: path.resolve(__dirname, '../../.env'), override: true });
 dotenv.config({ path: path.resolve(__dirname, '../../../.env'), override: false });
 
 const NODE_ENV = process.env.NODE_ENV || 'development';

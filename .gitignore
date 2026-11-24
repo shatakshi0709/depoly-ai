@@ -47,3 +47,6 @@ Thumbs.db
 prisma/client/
 
 apps/desktop/electron/preload.js
+
+depoly-ai/
+*.pdf

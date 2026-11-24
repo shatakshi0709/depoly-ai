@@ -1,6 +1,7 @@
 import { Router } from 'express';
-import { register, login, getMe, githubOAuthStart, githubOAuthCallback } from '../controllers/auth.controller.js';
+import { register, login, getMe, githubOAuthStart, githubOAuthCallback, githubOAuthConnectStart } from '../controllers/auth.controller.js';
 import { authenticateToken } from '../middleware/auth.js';
+import { optionalAuthenticateToken } from '../middleware/optionalAuth.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 
 const router = Router();
@@ -12,7 +13,8 @@ router.post('/register', authLimiter, register);
 router.post('/login', authLimiter, login);
 router.get('/me', authenticateToken, getMe);
 router.get('/github/start', oauthLimiter, githubOAuthStart);
-router.post('/github', oauthLimiter, githubOAuthCallback);
+router.get('/github/connect/start', oauthLimiter, authenticateToken, githubOAuthConnectStart);
+router.post('/github', oauthLimiter, optionalAuthenticateToken, githubOAuthCallback);
 
 export default router;
 

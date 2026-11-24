@@ -5,11 +5,12 @@ import { analyzeRepository } from '../services/analyzer.service.js';
 import { isNonEmptyString } from '../utils/validate.js';
 
 /**
- * List repositories accessible to the user.
+ * List repositories accessible to the authenticated user (via their linked GitHub OAuth token).
+ * No demo/fallback repositories are returned from this endpoint.
  */
 export async function getRepositories(req, res, next) {
   try {
-    // 1. Look for connected GitHub account
+    // 1. Look for connected GitHub account for the authenticated user
     const oauth = await prisma.oAuthAccount.findFirst({
       where: {
         userId: req.user.userId,
@@ -17,51 +18,56 @@ export async function getRepositories(req, res, next) {
       },
     });
 
-    if (oauth && oauth.accessTokenEnc) {
-      const decryptedToken = decrypt(oauth.accessTokenEnc);
+    if (!oauth || !oauth.accessTokenEnc) {
+      return res.status(400).json({
+        success: false,
+        error: 'GITHUB_NOT_CONNECTED',
+        message: 'GitHub account is not connected. Please sign in with GitHub to list your repositories.',
+      });
+    }
+
+    let decryptedToken;
+    try {
+      decryptedToken = decrypt(oauth.accessTokenEnc);
+    } catch {
+      return res.status(500).json({
+        success: false,
+        error: 'GITHUB_TOKEN_ERROR',
+        message: 'Stored GitHub credentials could not be read. Please reconnect your GitHub account.',
+      });
+    }
+
+    if (!decryptedToken) {
+      return res.status(400).json({
+        success: false,
+        error: 'GITHUB_NOT_CONNECTED',
+        message: 'GitHub account is not connected. Please sign in with GitHub to list your repositories.',
+      });
+    }
+
+    try {
       const repos = await getUserRepositories(decryptedToken);
       return res.json({
         success: true,
         source: 'GITHUB_OAUTH',
         data: repos,
       });
+    } catch (ghError) {
+      const status = ghError?.status || ghError?.response?.status;
+      const ghMessage = ghError?.response?.data?.message || ghError?.message || 'Failed to fetch repositories from GitHub.';
+      if (status === 401 || status === 403) {
+        return res.status(401).json({
+          success: false,
+          error: 'GITHUB_AUTH_FAILED',
+          message: `GitHub authentication failed: ${ghMessage}. Please reconnect your GitHub account.`,
+        });
+      }
+      return res.status(502).json({
+        success: false,
+        error: 'GITHUB_API_ERROR',
+        message: `Failed to fetch repositories from GitHub: ${ghMessage}`,
+      });
     }
-
-    // Fallback: If GitHub OAuth isn't linked yet, return curated starter repos
-    res.json({
-      success: true,
-      source: 'STARTER_TEMPLATES',
-      message: 'GitHub OAuth not connected. Showing featured full-stack template repositories.',
-      data: [
-        {
-          id: 101,
-          name: 'ecommerce-fullstack-starter',
-          fullName: 'demo-org/ecommerce-fullstack-starter',
-          url: 'https://github.com/demo-org/ecommerce-fullstack-starter',
-          defaultBranch: 'main',
-          language: 'TypeScript',
-          description: 'Production-ready e-commerce platform with Express backend and Vite React frontend.',
-        },
-        {
-          id: 102,
-          name: 'saas-analytics-app',
-          fullName: 'demo-org/saas-analytics-app',
-          url: 'https://github.com/demo-org/saas-analytics-app',
-          defaultBranch: 'main',
-          language: 'JavaScript',
-          description: 'SaaS analytics platform with real-time telemetry and dashboard.',
-        },
-        {
-          id: 103,
-          name: 'fastapi-react-dashboard',
-          fullName: 'demo-org/fastapi-react-dashboard',
-          url: 'https://github.com/demo-org/fastapi-react-dashboard',
-          defaultBranch: 'main',
-          language: 'Python',
-          description: 'High-performance Python FastAPI service connected to React frontend.',
-        },
-      ],
-    });
   } catch (error) {
     next(error);
   }

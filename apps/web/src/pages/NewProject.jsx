@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
+import { useAuth } from '../context/AuthContext';
 import { 
   Rocket, 
   Server, 
@@ -11,7 +12,8 @@ import {
   HelpCircle,
   Layers,
   ArrowRight,
-  RefreshCw
+  RefreshCw,
+  Loader2
 } from 'lucide-react';
 import { GithubIcon } from '../components/GithubIcon';
 
@@ -46,13 +48,34 @@ export function NewProject() {
   });
 
   const navigate = useNavigate();
+const { refreshProfile, user, loading: authLoading } = useAuth();
 
-  // 1. Fetch available repositories on load
+console.log('[NewProject] Component render. user=', JSON.stringify({ id: user?.id, hasGithubConnected: user?.hasGithubConnected, email: user?.email }), 'authLoading=', authLoading);
+
+  const [repoError, setRepoError] = useState('');
+const [oauthLoading, setOauthLoading] = useState(false);
+
+  // 1. Fetch available repositories on load (authenticated user's real GitHub repositories)
   useEffect(() => {
     async function loadRepos() {
+      console.log('[NewProject] loadRepos called. authLoading=', authLoading, 'hasGithubConnected=', user?.hasGithubConnected);
       try {
+        setRepoError('');
+        // Wait for auth to finish loading before deciding what to show
+        if (authLoading) {
+          console.log('[NewProject] loadRepos: auth still loading, skipping');
+          return;
+        }
+        // Only load repos if GitHub is connected; otherwise show Connect button
+        if (!user?.hasGithubConnected) {
+          console.log('[NewProject] loadRepos: GitHub not connected, showing Connect button');
+          setLoadingRepos(false);
+          return;
+        }
+        console.log('[NewProject] loadRepos: GitHub connected, fetching repos from /github/repos');
         const res = await api.get('/github/repos');
-        const list = res.data.data || [];
+        console.log('[NewProject] loadRepos: /github/repos status=', res.status, 'repoCount=', res.data?.data?.length || 0);
+        const list = res.data?.data || [];
         setRepositories(list);
 
         // Pre-select the first repo
@@ -60,13 +83,69 @@ export function NewProject() {
           selectRepo(list[0]);
         }
       } catch (err) {
-        console.error('Failed to load repositories:', err);
+        const message = err?.response?.data?.message || err?.message || 'Failed to load repositories from GitHub.';
+        console.log('[NewProject] loadRepos: /github/repos ERROR status=', err?.response?.status, 'message=', message);
+        setRepoError(message);
+        setRepositories([]);
       } finally {
-        setLoadingRepos(false);
+        if (!authLoading) setLoadingRepos(false);
       }
     }
     loadRepos();
-  }, []);
+  }, [authLoading, user]);
+
+  // Sync GitHub connection state when Electron window regains focus
+  // after OAuth completes in Chrome/system browser. Without this, Electron
+  // keeps the stale user profile from before OAuth (hasGithubConnected: false)
+  // and never re-fetches repositories.
+  const isElectron = typeof window !== 'undefined' && Boolean(window.electronAPI?.isElectron);
+  const focusProcessingRef = useRef(false);
+  const userRef = useRef(user);
+  userRef.current = user;
+
+  useEffect(() => {
+    if (!isElectron) {
+      console.log('[NewProject] Not Electron (isElectron=', isElectron, '), skipping focus sync');
+      return;
+    }
+    console.log('[NewProject] Electron detected, registering focus/visibility listeners');
+
+    const handleFocus = async () => {
+      console.log('[NewProject] Focus/visibility event fired. focusProcessingRef=', focusProcessingRef.current, 'hasGithubConnected=', userRef.current?.hasGithubConnected);
+      if (focusProcessingRef.current) {
+        console.log('[NewProject] Focus: already processing, skipping');
+        return;
+      }
+      // Only refresh if GitHub connection status is not yet confirmed
+      if (userRef.current?.hasGithubConnected) {
+        console.log('[NewProject] Focus: GitHub already connected, skipping refresh');
+        return;
+      }
+      focusProcessingRef.current = true;
+      console.log('[NewProject] Focus: calling refreshProfile()');
+      try {
+        await refreshProfile();
+        console.log('[NewProject] Focus: refreshProfile completed. New user=', JSON.stringify({ id: user?.id, hasGithubConnected: user?.hasGithubConnected }));
+      } catch (e) {
+        console.log('[NewProject] Focus: refreshProfile threw error:', e.message);
+      } finally {
+        focusProcessingRef.current = false;
+      }
+    };
+
+    // window.focus fires when the Electron BrowserWindow regains focus.
+    // visibilitychange fires when the page becomes visible again (more reliable
+    // for cross-app switching on some platforms). Both guard against duplicate
+    // execution via focusProcessingRef.
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleFocus);
+    console.log('[NewProject] Focus/visibility listeners registered');
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleFocus);
+      console.log('[NewProject] Focus/visibility listeners removed');
+    };
+  }, [isElectron, refreshProfile]);
 
   const selectRepo = (repo) => {
     setName(repo.name);
@@ -114,6 +193,32 @@ export function NewProject() {
       setError(err.response?.data?.message || 'Repository analysis failed.');
     } finally {
       setAnalyzing(false);
+    }
+  };
+
+  // Connect GitHub for already-authenticated user (Electron or web)
+  const connectGitHub = async () => {
+    console.log('[NewProject] connectGitHub: called. user=', JSON.stringify({ id: user?.id, hasGithubConnected: user?.hasGithubConnected }));
+    setRepoError('');
+    setOauthLoading(true);
+    try {
+      const res = await api.get('/auth/github/connect/start');
+      const { state, authorizeUrl } = res.data?.data || {};
+      if (!state || !authorizeUrl) {
+        throw new Error('OAuth connect start failed');
+      }
+      // Store state for callback handling (server-side signed-state verification is authoritative).
+      try {
+        sessionStorage.setItem('deplo_oauth_state', state);
+      } catch {
+        // Storage unavailable; server-side signed-state verification remains authoritative.
+      }
+      window.location.href = authorizeUrl;
+      console.log('[NewProject] connectGitHub: navigated to authorizeUrl. Electron will open system browser via will-navigate handler.');
+    } catch (err) {
+      setRepoError(err.response?.data?.message || 'Unable to start GitHub connection. Please try again.');
+    } finally {
+      setOauthLoading(false);
     }
   };
 
@@ -178,6 +283,48 @@ export function NewProject() {
           <span>Choose a Repository to Deploy</span>
           {loadingRepos && <span className="text-[11px] text-slate-500">Loading repositories...</span>}
         </label>
+
+        {repoError && (
+          <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 text-sm flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{repoError}</span>
+          </div>
+        )}
+
+        {authLoading ? (
+          <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 text-slate-400 text-sm flex items-center gap-2">
+            <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+            <span>Checking GitHub connection...</span>
+          </div>
+        ) : !user?.hasGithubConnected ? (
+          <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3">
+            <div className="flex items-center gap-2 text-sm">
+              <GithubIcon className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span className="text-slate-300">Connect your GitHub account to list repositories.</span>
+            </div>
+            <button
+              onClick={connectGitHub}
+              disabled={oauthLoading}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 hover:text-slate-950 font-medium text-sm transition disabled:opacity-60"
+            >
+              {oauthLoading ? (
+                <span className="flex items-center gap-1.5">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Connecting...
+                </span>
+              ) : (
+                <>
+                  <GithubIcon className="w-4 h-4" />
+                  Connect GitHub
+                </>
+              )}
+            </button>
+          </div>
+        ) : user?.hasGithubConnected && !loadingRepos && !repoError && repositories.length === 0 ? (
+          <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 text-slate-400 text-sm">
+            No repositories found for the connected GitHub account. You can still paste a repository URL below.
+          </div>
+        ) : null}
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           {repositories.map((repo) => (

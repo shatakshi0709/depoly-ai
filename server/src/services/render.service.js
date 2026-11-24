@@ -59,7 +59,13 @@ export async function createRenderWebService({ name, repoUrl, branch = 'main', r
       },
     };
 
-    const response = await client.post('/services', payload);
+    let response;
+    try {
+      response = await client.post('/services', payload);
+    } catch (err) {
+      const renderErr = sanitizeRenderError(err);
+      throw new Error(`Render API provisioning failed: ${renderErr.message}`);
+    }
     const service = response.data?.service || response.data;
     const deployId = response.data?.deployId || service?.deployId || service?.latestDeployId || null;
     const serviceId = service?.id || service?.service?.id;
@@ -225,4 +231,53 @@ export async function verifyBackendHealth(backendUrl, healthPath = '/health', { 
   }
 
   return { healthy: false, error: lastError, url: fullUrl, simulated: false };
+}
+
+/**
+ * Sanitize Render API error details from an axios error.
+ * Extracts the provider error message without exposing secrets/keys/tokens.
+ */
+export function sanitizeRenderError(err) {
+  if (!err) return { message: 'Unknown Render API error.' };
+
+  // axios network error (no response)
+  if (!err.response) {
+    return { message: err.message || 'Render API request failed.' };
+  }
+
+  const { status, data } = err.response || {};
+  let detail = '';
+
+  try {
+    if (data && typeof data === 'object') {
+      // Render API error bodies typically include: { error: { message: '...' } } or { message: '...' }
+      const errObj = data.error || data;
+      if (typeof errObj === 'object' && errObj.message) {
+        detail = String(errObj.message);
+      } else if (typeof data.message === 'string') {
+        detail = data.message;
+      } else if (typeof data.error === 'string') {
+        detail = data.error;
+      } else {
+        detail = JSON.stringify(data).slice(0, 1000);
+      }
+    } else if (typeof data === 'string') {
+      detail = data.slice(0, 1000);
+    }
+  } catch {
+    detail = String(data).slice(0, 1000);
+  }
+
+  // Strip any potential secret-like patterns from the detail
+  const sanitized = detail
+    .replace(/[A-Za-z0-9_-]{20,}/g, '[REDACTED]')
+    .replace(/sk_live_[A-Za-z0-9]+/g, '[REDACTED]')
+    .replace(/ghp_[A-Za-z0-9]+/g, '[REDACTED]')
+    .replace(/rnd_[A-Za-z0-9]+/g, '[REDACTED]');
+
+  return {
+    message: status ? `HTTP ${status}: ${sanitized || 'Render API request failed.'}` : sanitized || 'Render API request failed.',
+    status,
+    detail: sanitized,
+  };
 }

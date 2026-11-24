@@ -16,10 +16,14 @@ export function AuthProvider({ children }) {
     async function loadUser() {
       if (token) {
         try {
+          console.log('[AuthContext] loadUser: calling /auth/me');
           const res = await api.get('/auth/me');
+          console.log('[AuthContext] loadUser: /auth/me status=', res.status, 'hasGithubConnected=', res.data.data?.hasGithubConnected);
           setUser(res.data.data);
           localStorage.setItem('deplo_user', JSON.stringify(res.data.data));
+          console.log('[AuthContext] loadUser: user state updated');
         } catch (error) {
+          console.log('[AuthContext] loadUser: /auth/me ERROR:', error.message);
           console.error('Failed to authenticate token:', error);
           logout();
         }
@@ -57,12 +61,20 @@ export function AuthProvider({ children }) {
   };
 
   const refreshProfile = async () => {
-    if (!token) return;
+    console.log('[AuthContext] refreshProfile: called. token present=', Boolean(token));
+    if (!token) {
+      console.log('[AuthContext] refreshProfile: no token, returning early');
+      return;
+    }
     try {
+      console.log('[AuthContext] refreshProfile: calling /auth/me');
       const res = await api.get('/auth/me');
+      console.log('[AuthContext] refreshProfile: /auth/me status=', res.status, 'hasGithubConnected=', res.data.data?.hasGithubConnected);
       setUser(res.data.data);
       localStorage.setItem('deplo_user', JSON.stringify(res.data.data));
+      console.log('[AuthContext] refreshProfile: user state updated with hasGithubConnected=', res.data.data?.hasGithubConnected);
     } catch (e) {
+      console.log('[AuthContext] refreshProfile: /auth/me ERROR:', e.message);
       console.error('Error refreshing profile:', e);
     }
   };
