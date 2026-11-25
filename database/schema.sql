@@ -1,6 +1,7 @@
 -- ==============================================================================
 -- deplo.ai — PostgreSQL Schema DDL (Pure SQL for College Evaluation)
 -- Course Requirements: Primary/Foreign Keys, Checks, Indexes, Views, Aggregations
+-- Schema Version: 1.0.1
 -- ==============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
